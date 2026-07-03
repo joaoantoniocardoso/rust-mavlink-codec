@@ -70,7 +70,7 @@ const SIGNING_KEY: [u8; mavlink_codec::signing::SECRET_KEY_SIZE] = [
 fn add_random_v2_message(buf: &mut Vec<u8>, rng: &mut StdRng) {
     use rand::Rng;
 
-    use mavlink::ardupilotmega::*;
+    use mavlink::dialects::ardupilotmega::*;
 
     let header = mavlink::MavHeader {
         system_id: rng.gen_range(1..255),
@@ -95,7 +95,7 @@ fn add_random_signed_v2_message(
 ) {
     use rand::Rng;
 
-    use mavlink::ardupilotmega::*;
+    use mavlink::dialects::ardupilotmega::*;
 
     let header = mavlink::MavHeader {
         system_id: rng.gen_range(1..255),
@@ -105,7 +105,7 @@ fn add_random_signed_v2_message(
 
     loop {
         let message_id = rng.gen_range(0..2 ^ 24);
-        if let Ok(data) = MavMessage::default_message_from_id(message_id) {
+        if let Some(data) = MavMessage::default_message_from_id(message_id) {
             let mut raw = mavlink::MAVLinkV2MessageRaw::new();
             raw.serialize_message_for_signing(header, &data);
             signing.sign_message(&mut raw);
@@ -154,14 +154,13 @@ fn benchmark_decode(c: &mut Criterion) {
                     },
                     |mut reader| async move {
                         for _ in 0..messages_count {
-                            let _msg =
-                                black_box(
-                                    mavlink::read_v2_raw_message::<
-                                        mavlink::ardupilotmega::MavMessage,
-                                        _,
-                                    >(&mut reader)
-                                    .unwrap(),
-                                );
+                            let _msg = black_box(
+                                mavlink::read_v2_raw_message::<
+                                    mavlink::dialects::ardupilotmega::MavMessage,
+                                    _,
+                                >(&mut reader)
+                                .unwrap(),
+                            );
                         }
                     },
                     criterion::BatchSize::SmallInput,
@@ -185,7 +184,7 @@ fn benchmark_decode(c: &mut Criterion) {
                         for _ in 0..messages_count {
                             let _msg = black_box(
                                 mavlink::read_v2_raw_message_async::<
-                                    mavlink::ardupilotmega::MavMessage,
+                                    mavlink::dialects::ardupilotmega::MavMessage,
                                     _,
                                 >(&mut reader)
                                 .await
@@ -322,7 +321,7 @@ fn benchmark_decode_signed(c: &mut Criterion) {
                     |(mut reader, signing)| async move {
                         for _ in 0..messages_count {
                             let msg = mavlink::read_v2_raw_message::<
-                                mavlink::ardupilotmega::MavMessage,
+                                mavlink::dialects::ardupilotmega::MavMessage,
                                 _,
                             >(&mut reader)
                             .unwrap();
@@ -352,7 +351,7 @@ fn benchmark_decode_signed(c: &mut Criterion) {
                     |(mut reader, signing)| async move {
                         for _ in 0..messages_count {
                             let msg = mavlink::read_v2_raw_message_async::<
-                                mavlink::ardupilotmega::MavMessage,
+                                mavlink::dialects::ardupilotmega::MavMessage,
                                 _,
                             >(&mut reader)
                             .await
