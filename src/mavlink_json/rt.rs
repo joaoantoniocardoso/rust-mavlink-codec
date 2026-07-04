@@ -6,6 +6,9 @@
 //! identical to the `rust-mavlink` + `serde_json` baseline. Keeping the logic here (and only the
 //! data generated) keeps the generated code tiny and lets the whole dialect share one hot loop.
 
+use bytes::Bytes;
+
+use crate::v2::{V2Packet, V2_STX};
 use crate::Packet;
 
 /// A whole message: its id, wire name (the serde `"type"` tag) and ordered fields.
@@ -16,6 +19,8 @@ pub struct MsgDesc {
     pub id: u32,
     pub name: &'static str,
     pub payload_len: u16,
+    /// MAVLink `CRC_EXTRA` seed byte, baked at build time (rust-mavlink's `extra_crc`).
+    pub crc_extra: u8,
     pub fields: &'static [FieldDesc],
 }
 
@@ -341,4 +346,540 @@ fn hex_digit(nibble: u8) -> u8 {
     } else {
         b'a' + (nibble - 10)
     }
+}
+
+/// Transcodes MAVLinkJSON text straight to a wire v2 [`Packet`], resolving the message descriptor
+/// from the `"type"` tag via `resolve`. Returns `None` if the type is unknown or the JSON is
+/// malformed.
+///
+/// Produces the exact same frame as `serde_json::from_str::<MAVLinkJSON<_>>` followed by
+/// `to_packet(MavlinkVersion::V2)`, tolerating reordered members and extra whitespace.
+pub fn from_json_v2(json: &[u8], resolve: fn(&[u8]) -> Option<&'static MsgDesc>) -> Option<Packet> {
+    let mut p = Parser { b: json, i: 0 };
+    let mut sys = 0u8;
+    let mut comp = 0u8;
+    let mut seq = 0u8;
+    let mut payload = [0u8; 255];
+    let mut desc: Option<&'static MsgDesc> = None;
+
+    p.skip_ws();
+    p.expect(b'{')?;
+    loop {
+        p.skip_ws();
+        match p.peek()? {
+            b'}' => break,
+            b',' => p.i += 1,
+            b'"' => {
+                let key = p.string_raw()?;
+                p.skip_ws();
+                p.expect(b':')?;
+                p.skip_ws();
+                match key {
+                    b"header" => parse_header(&mut p, &mut sys, &mut comp, &mut seq)?,
+                    b"message" => desc = Some(parse_message(&mut p, resolve, &mut payload)?),
+                    _ => p.skip_value()?,
+                }
+            }
+            _ => return None,
+        }
+    }
+
+    let desc = desc?;
+    Some(build_v2_frame(
+        desc,
+        sys,
+        comp,
+        seq,
+        &payload[..desc.payload_len as usize],
+    ))
+}
+
+fn parse_header(p: &mut Parser, sys: &mut u8, comp: &mut u8, seq: &mut u8) -> Option<()> {
+    p.expect(b'{')?;
+    loop {
+        p.skip_ws();
+        match p.peek()? {
+            b'}' => {
+                p.i += 1;
+                return Some(());
+            }
+            b',' => p.i += 1,
+            b'"' => {
+                let key = p.string_raw()?;
+                p.skip_ws();
+                p.expect(b':')?;
+                p.skip_ws();
+                match key {
+                    b"system_id" => *sys = p.number_i64()? as u8,
+                    b"component_id" => *comp = p.number_i64()? as u8,
+                    b"sequence" => *seq = p.number_i64()? as u8,
+                    // `message_id` (and anything else) is redundant with the "type" tag.
+                    _ => p.skip_value()?,
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn parse_message(
+    p: &mut Parser,
+    resolve: fn(&[u8]) -> Option<&'static MsgDesc>,
+    payload: &mut [u8],
+) -> Option<&'static MsgDesc> {
+    p.expect(b'{')?;
+    let mut desc: Option<&'static MsgDesc> = None;
+    loop {
+        p.skip_ws();
+        match p.peek()? {
+            b'}' => {
+                p.i += 1;
+                return desc;
+            }
+            b',' => p.i += 1,
+            b'"' => {
+                let key = p.string_raw()?;
+                p.skip_ws();
+                p.expect(b':')?;
+                p.skip_ws();
+                if key == b"type" {
+                    // serde emits the tag first, so the descriptor is known before any field.
+                    desc = resolve(p.string_raw()?);
+                } else {
+                    let d = desc?;
+                    match d.fields.iter().find(|f| f.name.as_bytes() == key) {
+                        Some(field) => write_field(p, field, payload)?,
+                        None => p.skip_value()?,
+                    }
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn write_field(p: &mut Parser, field: &FieldDesc, payload: &mut [u8]) -> Option<()> {
+    let off = field.offset as usize;
+    match field.kind {
+        FieldKind::Scalar(sk) => write_scalar(p, off, sk, payload),
+        FieldKind::CharArray(len) => {
+            p.string_into(&mut payload[off..off + len as usize]);
+            Some(())
+        }
+        FieldKind::Array(sk, len) => {
+            p.expect(b'[')?;
+            let size = scalar_size(sk);
+            let mut k = 0usize;
+            loop {
+                p.skip_ws();
+                match p.peek()? {
+                    b']' => {
+                        p.i += 1;
+                        return Some(());
+                    }
+                    b',' => p.i += 1,
+                    _ => {
+                        if k < len as usize {
+                            write_scalar(p, off + k * size, sk, payload)?;
+                        } else {
+                            p.skip_value()?;
+                        }
+                        k += 1;
+                    }
+                }
+            }
+        }
+        FieldKind::Enum(table, sk) => {
+            let value = parse_enum_object(p, table)?;
+            write_uint(payload, off, sk, value);
+            Some(())
+        }
+        FieldKind::Bitmask(table, sk) => {
+            let bits = parse_bitmask(table, p.string_raw()?);
+            write_uint(payload, off, sk, bits);
+            Some(())
+        }
+    }
+}
+
+/// Parses `{"type":"NAME"}` and resolves `NAME` to its value via `table`.
+fn parse_enum_object(p: &mut Parser, table: &[(u64, &'static str)]) -> Option<u64> {
+    p.expect(b'{')?;
+    let mut value = 0u64;
+    loop {
+        p.skip_ws();
+        match p.peek()? {
+            b'}' => {
+                p.i += 1;
+                return Some(value);
+            }
+            b',' => p.i += 1,
+            b'"' => {
+                let key = p.string_raw()?;
+                p.skip_ws();
+                p.expect(b':')?;
+                p.skip_ws();
+                if key == b"type" {
+                    value = enum_value(table, p.string_raw()?);
+                } else {
+                    p.skip_value()?;
+                }
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn write_scalar(p: &mut Parser, off: usize, sk: ScalarKind, payload: &mut [u8]) -> Option<()> {
+    let tok = p.number_token()?;
+    match sk {
+        ScalarKind::U8 => payload[off] = parse_i64(tok) as u8,
+        ScalarKind::I8 => payload[off] = parse_i64(tok) as i8 as u8,
+        ScalarKind::U16 => {
+            payload[off..off + 2].copy_from_slice(&(parse_i64(tok) as u16).to_le_bytes())
+        }
+        ScalarKind::I16 => {
+            payload[off..off + 2].copy_from_slice(&(parse_i64(tok) as i16).to_le_bytes())
+        }
+        ScalarKind::U32 => {
+            payload[off..off + 4].copy_from_slice(&(parse_i64(tok) as u32).to_le_bytes())
+        }
+        ScalarKind::I32 => {
+            payload[off..off + 4].copy_from_slice(&(parse_i64(tok) as i32).to_le_bytes())
+        }
+        ScalarKind::U64 => payload[off..off + 8].copy_from_slice(&parse_u64(tok).to_le_bytes()),
+        ScalarKind::I64 => payload[off..off + 8].copy_from_slice(&parse_i64(tok).to_le_bytes()),
+        ScalarKind::F32 => payload[off..off + 4].copy_from_slice(&parse_f32(tok).to_le_bytes()),
+        ScalarKind::F64 => payload[off..off + 8].copy_from_slice(&parse_f64(tok).to_le_bytes()),
+    }
+    Some(())
+}
+
+#[inline(always)]
+fn write_uint(payload: &mut [u8], off: usize, sk: ScalarKind, value: u64) {
+    match sk {
+        ScalarKind::U8 | ScalarKind::I8 => payload[off] = value as u8,
+        ScalarKind::U16 | ScalarKind::I16 => {
+            payload[off..off + 2].copy_from_slice(&(value as u16).to_le_bytes())
+        }
+        ScalarKind::U32 | ScalarKind::I32 => {
+            payload[off..off + 4].copy_from_slice(&(value as u32).to_le_bytes())
+        }
+        ScalarKind::U64 | ScalarKind::I64 => {
+            payload[off..off + 8].copy_from_slice(&value.to_le_bytes())
+        }
+        ScalarKind::F32 | ScalarKind::F64 => {}
+    }
+}
+
+#[inline(always)]
+fn scalar_size(sk: ScalarKind) -> usize {
+    match sk {
+        ScalarKind::U8 | ScalarKind::I8 => 1,
+        ScalarKind::U16 | ScalarKind::I16 => 2,
+        ScalarKind::U32 | ScalarKind::I32 | ScalarKind::F32 => 4,
+        ScalarKind::U64 | ScalarKind::I64 | ScalarKind::F64 => 8,
+    }
+}
+
+#[inline(always)]
+fn enum_value(table: &[(u64, &'static str)], name: &[u8]) -> u64 {
+    for (value, n) in table {
+        if n.as_bytes() == name {
+            return *value;
+        }
+    }
+    0
+}
+
+/// Reverse of [`put_bitmask`]: `" | "`-joined flag names back into a bitmask.
+fn parse_bitmask(table: &[(u64, &'static str)], s: &[u8]) -> u64 {
+    let mut bits = 0u64;
+    for part in s.split(|&b| b == b'|') {
+        let part = part.trim_ascii();
+        if !part.is_empty() {
+            bits |= enum_value(table, part);
+        }
+    }
+    bits
+}
+
+/// Builds a MAVLink v2 frame (STX, header, trailing-zero-trimmed payload, CRC), byte-identical to
+/// rust-mavlink's `serialize_message`.
+fn build_v2_frame(desc: &MsgDesc, sys: u8, comp: u8, seq: u8, payload: &[u8]) -> Packet {
+    let mut len = payload.len();
+    while len > 0 && payload[len - 1] == 0 {
+        len -= 1;
+    }
+
+    let msgid = desc.id.to_le_bytes();
+    let mut frame = Vec::with_capacity(1 + V2Packet::HEADER_SIZE + len + V2Packet::CHECKSUM_SIZE);
+    frame.push(V2_STX);
+    frame.push(len as u8);
+    frame.push(0); // incompat flags
+    frame.push(0); // compat flags
+    frame.push(seq);
+    frame.push(sys);
+    frame.push(comp);
+    frame.extend_from_slice(&msgid[0..3]);
+    frame.extend_from_slice(&payload[..len]);
+
+    let crc = mavlink::calculate_crc(&frame[1..], desc.crc_extra);
+    frame.extend_from_slice(&crc.to_le_bytes());
+
+    Packet::V2(V2Packet::new(Bytes::from(frame)))
+}
+
+#[inline(always)]
+fn parse_i64(s: &[u8]) -> i64 {
+    let (neg, digits) = match s.first() {
+        Some(b'-') => (true, &s[1..]),
+        _ => (false, s),
+    };
+    let mut value = 0i64;
+    for &b in digits {
+        if b.is_ascii_digit() {
+            value = value * 10 + (b - b'0') as i64;
+        } else {
+            break;
+        }
+    }
+    if neg {
+        -value
+    } else {
+        value
+    }
+}
+
+#[inline(always)]
+fn parse_u64(s: &[u8]) -> u64 {
+    let mut value = 0u64;
+    for &b in s {
+        if b.is_ascii_digit() {
+            value = value * 10 + (b - b'0') as u64;
+        } else {
+            break;
+        }
+    }
+    value
+}
+
+/// Parses a JSON float token into an `f32`. Rust's parser is correctly-rounding, so the shortest
+/// round-trippable text emitted by `zmij`/serde_json reproduces the exact bits. `null` (and any
+/// junk) parses to 0.0; the serde baseline itself cannot deserialize `null` floats.
+#[inline(always)]
+fn parse_f32(s: &[u8]) -> f32 {
+    core::str::from_utf8(s)
+        .ok()
+        .and_then(|s| s.parse::<f32>().ok())
+        .unwrap_or(0.0)
+}
+
+#[inline(always)]
+fn parse_f64(s: &[u8]) -> f64 {
+    core::str::from_utf8(s)
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .unwrap_or(0.0)
+}
+
+/// A minimal, whitespace-tolerant cursor over MAVLinkJSON text.
+struct Parser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> Parser<'a> {
+    #[inline(always)]
+    fn peek(&self) -> Option<u8> {
+        self.b.get(self.i).copied()
+    }
+
+    #[inline(always)]
+    fn expect(&mut self, c: u8) -> Option<()> {
+        if self.peek()? == c {
+            self.i += 1;
+            Some(())
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(b) if b.is_ascii_whitespace()) {
+            self.i += 1;
+        }
+    }
+
+    /// Reads a quoted string, returning the raw (still-escaped) inner slice. Fine for keys, enum
+    /// names, the message tag and bitmask strings, none of which contain escapes.
+    fn string_raw(&mut self) -> Option<&'a [u8]> {
+        if self.peek()? != b'"' {
+            return None;
+        }
+        self.i += 1;
+        let start = self.i;
+        while let Some(c) = self.peek() {
+            match c {
+                b'\\' => self.i += 2,
+                b'"' => {
+                    let s = &self.b[start..self.i];
+                    self.i += 1;
+                    return Some(s);
+                }
+                _ => self.i += 1,
+            }
+        }
+        None
+    }
+
+    /// Reads a bare token (number, or `null`/`true`/`false`) up to the next structural byte.
+    fn number_token(&mut self) -> Option<&'a [u8]> {
+        let start = self.i;
+        while let Some(c) = self.peek() {
+            if matches!(c, b',' | b'}' | b']') || c.is_ascii_whitespace() {
+                break;
+            }
+            self.i += 1;
+        }
+        (self.i != start).then(|| &self.b[start..self.i])
+    }
+
+    #[inline(always)]
+    fn number_i64(&mut self) -> Option<i64> {
+        Some(parse_i64(self.number_token()?))
+    }
+
+    /// Reads a JSON string, unescaping its contents into `dest` (truncating to `dest.len()`, like
+    /// mavlink-core's char-array deserialize). Bytes not written stay as the caller left them
+    /// (the payload buffer is zero-initialized).
+    fn string_into(&mut self, dest: &mut [u8]) -> Option<()> {
+        if self.peek()? != b'"' {
+            return None;
+        }
+        self.i += 1;
+        let mut w = 0usize;
+        while let Some(c) = self.peek() {
+            match c {
+                b'"' => {
+                    self.i += 1;
+                    return Some(());
+                }
+                b'\\' => {
+                    self.i += 1;
+                    let e = self.peek()?;
+                    self.i += 1;
+                    match e {
+                        b'u' => {
+                            let cp = self.hex4()?;
+                            w = utf8_encode(cp, dest, w);
+                        }
+                        _ => {
+                            let byte = match e {
+                                b'"' => b'"',
+                                b'\\' => b'\\',
+                                b'/' => b'/',
+                                b'b' => 0x08,
+                                b'f' => 0x0c,
+                                b'n' => b'\n',
+                                b'r' => b'\r',
+                                b't' => b'\t',
+                                _ => return None,
+                            };
+                            if w < dest.len() {
+                                dest[w] = byte;
+                                w += 1;
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    if w < dest.len() {
+                        dest[w] = c;
+                        w += 1;
+                    }
+                    self.i += 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn hex4(&mut self) -> Option<u32> {
+        let mut v = 0u32;
+        for _ in 0..4 {
+            let d = hex_val(self.peek()?)?;
+            self.i += 1;
+            v = v * 16 + d as u32;
+        }
+        Some(v)
+    }
+
+    /// Skips one JSON value (string, number/literal, object or array).
+    fn skip_value(&mut self) -> Option<()> {
+        self.skip_ws();
+        match self.peek()? {
+            b'"' => self.string_raw().map(|_| ()),
+            b'{' | b'[' => self.skip_container(),
+            _ => self.number_token().map(|_| ()),
+        }
+    }
+
+    fn skip_container(&mut self) -> Option<()> {
+        let open = self.peek()?;
+        let close = if open == b'{' { b'}' } else { b']' };
+        self.i += 1;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.peek()? {
+                b'"' => {
+                    self.string_raw()?;
+                }
+                c if c == open => {
+                    self.i += 1;
+                    depth += 1;
+                }
+                c if c == close => {
+                    self.i += 1;
+                    depth -= 1;
+                }
+                _ => self.i += 1,
+            }
+        }
+        Some(())
+    }
+}
+
+#[inline(always)]
+fn hex_val(c: u8) -> Option<u8> {
+    match c {
+        b'0'..=b'9' => Some(c - b'0'),
+        b'a'..=b'f' => Some(c - b'a' + 10),
+        b'A'..=b'F' => Some(c - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// UTF-8 encodes a code point into `dest` at `w` (truncating if it would overflow), returning the
+/// new write index. Surrogate halves are passed through as the replacement-free raw code point;
+/// MAVLink char arrays are plain UTF-8 text so this path is only hit for `\u00XX` control escapes.
+fn utf8_encode(cp: u32, dest: &mut [u8], mut w: usize) -> usize {
+    let mut push = |b: u8, w: &mut usize| {
+        if *w < dest.len() {
+            dest[*w] = b;
+            *w += 1;
+        }
+    };
+    if cp < 0x80 {
+        push(cp as u8, &mut w);
+    } else if cp < 0x800 {
+        push(0xC0 | (cp >> 6) as u8, &mut w);
+        push(0x80 | (cp & 0x3F) as u8, &mut w);
+    } else {
+        push(0xE0 | (cp >> 12) as u8, &mut w);
+        push(0x80 | ((cp >> 6) & 0x3F) as u8, &mut w);
+        push(0x80 | (cp & 0x3F) as u8, &mut w);
+    }
+    w
 }

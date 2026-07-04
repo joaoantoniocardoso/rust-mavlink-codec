@@ -224,6 +224,16 @@ fn benchmark_spike_from_json(c: &mut Criterion) {
             })
         });
 
+        // Generated: descriptor-driven JSON -> wire (the shippable reverse path).
+        group.bench_function("generated-transcode", |b| {
+            b.iter(|| {
+                for json in &jsons {
+                    let packet = Packet::from_json_transcoded(json.as_bytes());
+                    black_box(packet);
+                }
+            })
+        });
+
         group.finish();
     }
 }

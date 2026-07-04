@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use mavlink_bindgen::parser::{parse_profile, MavEnum, MavField, MavProfile, MavType};
+use mavlink_bindgen::parser::{extra_crc, parse_profile, MavEnum, MavField, MavProfile, MavType};
 
 /// Messages the generated transcoders currently cover. Grows toward the full dialect; kept as an
 /// allowlist so every generated message is backed by a property test before it ships.
@@ -48,6 +48,7 @@ fn emit_module(profile: &MavProfile) -> String {
     let mut fields_code = String::new();
     let mut msgs_code = String::new();
     let mut dispatch = String::new();
+    let mut dispatch_by_name = String::new();
 
     for name in SUBSET {
         let msg = profile
@@ -75,10 +76,15 @@ fn emit_module(profile: &MavProfile) -> String {
         );
         let _ = writeln!(
             msgs_code,
-            "static {msg_ident}: MsgDesc = MsgDesc {{ id: {}, name: {:?}, payload_len: {}, fields: {fields_ident} }};",
-            msg.id, msg.name, offset
+            "static {msg_ident}: MsgDesc = MsgDesc {{ id: {}, name: {:?}, payload_len: {}, crc_extra: {}, fields: {fields_ident} }};",
+            msg.id, msg.name, offset, extra_crc(msg)
         );
         let _ = writeln!(dispatch, "        {} => Some(&{msg_ident}),", msg.id);
+        let _ = writeln!(
+            dispatch_by_name,
+            "        b{:?} => Some(&{msg_ident}),",
+            msg.name
+        );
     }
 
     let mut code = String::new();
@@ -96,6 +102,12 @@ fn emit_module(profile: &MavProfile) -> String {
          pub fn descriptor(id: u32) -> Option<&'static MsgDesc> {\n    match id {\n",
     );
     code.push_str(&dispatch);
+    code.push_str("        _ => None,\n    }\n}\n");
+    code.push_str(
+        "\n/// Returns the descriptor for a MAVLink message name (the serde `\"type\"` tag).\n\
+         pub fn descriptor_by_name(name: &[u8]) -> Option<&'static MsgDesc> {\n    match name {\n",
+    );
+    code.push_str(&dispatch_by_name);
     code.push_str("        _ => None,\n    }\n}\n");
     code
 }

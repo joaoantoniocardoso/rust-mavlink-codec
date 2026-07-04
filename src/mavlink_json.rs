@@ -71,6 +71,14 @@ impl Packet {
             None => false,
         }
     }
+
+    /// Transcodes MAVLinkJSON text straight to a wire v2 [`Packet`] via the generated descriptor
+    /// tables, resolving the message from its `"type"` tag. Returns `None` if the type is not
+    /// covered by the generator or the JSON is malformed. Produces the exact same frame as
+    /// deserializing into [`MAVLinkJSON`] and calling `to_packet(MavlinkVersion::V2)`.
+    pub fn from_json_transcoded(json: &[u8]) -> Option<Packet> {
+        rt::from_json_v2(json, generated::descriptor_by_name)
+    }
 }
 
 impl<M: Message + Serialize> MAVLinkJSON<M> {

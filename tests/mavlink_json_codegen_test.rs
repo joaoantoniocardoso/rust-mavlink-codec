@@ -88,6 +88,68 @@ fn generated_indexed_ranges_match_serde_fields() {
     }
 }
 
+/// Reverse direction: the generated `Packet::from_json_transcoded` must produce byte-identical
+/// frames to the serde baseline (`from_str` + `to_packet`), tolerating extra whitespace.
+#[test]
+fn generated_from_json_matches_serde_baseline() {
+    use mavlink::MavlinkVersion;
+    use mavlink_codec::mavlink_json::MAVLinkJSON;
+
+    use mavlink_codec::mavlink_json::{generated, rt::FieldKind};
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(0x0FF_1234);
+
+    for &id in SUBSET_IDS {
+        // Naive `:`/`,` -> spaced replacement corrupts the interior of char-array string values,
+        // so only exercise whitespace tolerance on messages without one. The scanner structure is
+        // still covered by the other messages (incl. enum objects and bitmask strings).
+        let has_char_array = generated::descriptor(id)
+            .unwrap()
+            .fields
+            .iter()
+            .any(|f| matches!(f.kind, FieldKind::CharArray(_)));
+        let mut tested = 0;
+        for _ in 0..8000 {
+            let raw = dev_utils::create_random_v2_message_from_id(&mut rng, id).unwrap();
+            let packet = Packet::V2(V2Packet::from(raw));
+
+            let json =
+                serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+            // The serde baseline cannot deserialize the `null` emitted for non-finite floats, so
+            // that value never round-trips through either path; keep both sides comparable.
+            if json.contains("null") {
+                continue;
+            }
+
+            // Baseline: serde deserialize + typed re-serialize to wire.
+            let baseline: MAVLinkJSON<MavMessage> = serde_json::from_str(&json).unwrap();
+            let baseline_packet = baseline.to_packet(MavlinkVersion::V2);
+
+            let transcoded = Packet::from_json_transcoded(json.as_bytes())
+                .unwrap_or_else(|| panic!("id {id} not covered by reverse generator"));
+            assert_eq!(
+                transcoded.as_slice(),
+                baseline_packet.as_slice(),
+                "reverse transcoder diverged for id {id}: {json}"
+            );
+
+            // Whitespace tolerance: the parser must reproduce the same frame.
+            if !has_char_array {
+                let spaced = json.replace(':', " : ").replace(',', " , ");
+                let spaced_packet = Packet::from_json_transcoded(spaced.as_bytes()).unwrap();
+                assert_eq!(
+                    spaced_packet.as_slice(),
+                    baseline_packet.as_slice(),
+                    "reverse transcoder whitespace intolerance for id {id}"
+                );
+            }
+
+            tested += 1;
+        }
+        assert!(tested > 100, "too few samples for id {id}: {tested}");
+    }
+}
+
 /// Returns the raw JSON value token that follows `"key":` in `json` (a balanced number, string,
 /// object or array). Keys are searched quoted+colon so shorter keys never match inside longer
 /// ones. Used as an exact per-field oracle without the f32->f64 upcast of `to_value`.
