@@ -255,6 +255,65 @@ fn spike_global_position_int_from_json_matches_baseline() {
     }
 }
 
+/// Reverse Option C spike for floats: the ATTITUDE JSON -> wire transcoder must be byte-identical
+/// to the serde baseline (which itself cannot handle the `null` emitted for non-finite floats,
+/// so those are skipped).
+#[test]
+fn spike_attitude_from_json_matches_baseline() {
+    use mavlink_codec::mavlink_json::experimental;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(777);
+
+    let mut tested = 0;
+    for _ in 0..20000 {
+        let raw = dev_utils::create_random_v2_message_from_id(&mut rng, experimental::ATTITUDE_ID)
+            .unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+
+        let json = serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+        // The serde baseline cannot deserialize `null` floats, so neither direction round-trips.
+        if json.contains("null") {
+            continue;
+        }
+
+        let spike = experimental::attitude_from_json(json.as_bytes());
+        assert_eq!(spike.as_slice(), packet.as_slice(), "json: {json}");
+        tested += 1;
+    }
+    assert!(
+        tested > 100,
+        "expected many finite-float samples, got {tested}"
+    );
+}
+
+/// Reverse Option C spike for enums + bitflags: the HEARTBEAT JSON -> wire transcoder must be
+/// byte-identical to the serde baseline, including reordered fields and extra whitespace.
+#[test]
+fn spike_heartbeat_from_json_matches_baseline() {
+    use mavlink_codec::mavlink_json::experimental;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(999);
+
+    for _ in 0..20000 {
+        let raw = dev_utils::create_random_v2_message_from_id(&mut rng, experimental::HEARTBEAT_ID)
+            .unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+
+        let json = serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+
+        let spike = experimental::heartbeat_from_json(json.as_bytes());
+        assert_eq!(spike.as_slice(), packet.as_slice(), "json: {json}");
+
+        let spaced = json.replace(':', " : ").replace(',', " , ");
+        let spike_spaced = experimental::heartbeat_from_json(spaced.as_bytes());
+        assert_eq!(
+            spike_spaced.as_slice(),
+            packet.as_slice(),
+            "spaced: {spaced}"
+        );
+    }
+}
+
 fn build_packet(message: &MavMessage) -> Packet {
     let header = mavlink::MavHeader {
         system_id: 42,

@@ -254,6 +254,269 @@ pub mod experimental {
         }
     }
 
+    /// Parses a JSON float slice into an `f32`. Rust's parser is correctly-rounding, so the
+    /// shortest round-trippable text emitted by `zmij`/serde_json reproduces the exact bits.
+    #[inline(always)]
+    fn parse_f32(s: &[u8]) -> f32 {
+        core::str::from_utf8(s)
+            .ok()
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.0)
+    }
+
+    /// Reverse Option C spike for the float value type: parses an `ATTITUDE` MAVLinkJSON string
+    /// straight into a wire [`Packet`], byte-identical to the serde baseline.
+    ///
+    /// Only handles finite floats: the serde baseline itself cannot deserialize the `null` that
+    /// non-finite floats serialize to, so those never round-trip either way.
+    pub fn attitude_from_json(json: &[u8]) -> Packet {
+        let mut system_id = 0u8;
+        let mut component_id = 0u8;
+        let mut sequence = 0u8;
+        let mut time_boot_ms = 0u32;
+        // roll, pitch, yaw, rollspeed, pitchspeed, yawspeed
+        let mut floats = [0f32; 6];
+
+        let mut scanner = Scanner::new(json);
+        while let Some((key, value)) = scanner.next_scalar() {
+            match value {
+                Value::Number(num) => match key {
+                    b"system_id" => system_id = parse_i64(num) as u8,
+                    b"component_id" => component_id = parse_i64(num) as u8,
+                    b"sequence" => sequence = parse_i64(num) as u8,
+                    b"time_boot_ms" => time_boot_ms = parse_i64(num) as u32,
+                    b"roll" => floats[0] = parse_f32(num),
+                    b"pitch" => floats[1] = parse_f32(num),
+                    b"yaw" => floats[2] = parse_f32(num),
+                    b"rollspeed" => floats[3] = parse_f32(num),
+                    b"pitchspeed" => floats[4] = parse_f32(num),
+                    b"yawspeed" => floats[5] = parse_f32(num),
+                    _ => {}
+                },
+                Value::String(_) | Value::EnterObject | Value::EnterArray => {}
+            }
+        }
+
+        let mut payload = [0u8; ATTITUDE_PAYLOAD_LEN];
+        payload[0..4].copy_from_slice(&time_boot_ms.to_le_bytes());
+        payload[4..8].copy_from_slice(&floats[0].to_le_bytes());
+        payload[8..12].copy_from_slice(&floats[1].to_le_bytes());
+        payload[12..16].copy_from_slice(&floats[2].to_le_bytes());
+        payload[16..20].copy_from_slice(&floats[3].to_le_bytes());
+        payload[20..24].copy_from_slice(&floats[4].to_le_bytes());
+        payload[24..28].copy_from_slice(&floats[5].to_le_bytes());
+
+        build_v2_frame(ATTITUDE_ID, system_id, component_id, sequence, &payload)
+    }
+
+    /// Reverse Option C spike for the enum and bitflag value types: parses a `HEARTBEAT`
+    /// MAVLinkJSON string straight into a wire [`Packet`], byte-identical to the serde baseline.
+    ///
+    /// Enum names (`{"type":"NAME"}`) and the `base_mode` bitflag string are reverse-looked-up
+    /// through the same static name tables used by the forward transcoder.
+    pub fn heartbeat_from_json(json: &[u8]) -> Packet {
+        let mut system_id = 0u8;
+        let mut component_id = 0u8;
+        let mut sequence = 0u8;
+        let mut custom_mode = 0u32;
+        let mut mavtype = 0u8;
+        let mut autopilot = 0u8;
+        let mut base_mode = 0u8;
+        let mut system_status = 0u8;
+        let mut mavlink_version = 0u8;
+
+        // The `"type"` key collides between the message tag and each nested enum; track which
+        // enum object we most recently descended into to route its inner `"type"` string.
+        let mut enum_ctx = EnumCtx::None;
+
+        let mut scanner = Scanner::new(json);
+        while let Some((key, value)) = scanner.next_scalar() {
+            match value {
+                Value::Number(num) => match key {
+                    b"system_id" => system_id = parse_i64(num) as u8,
+                    b"component_id" => component_id = parse_i64(num) as u8,
+                    b"sequence" => sequence = parse_i64(num) as u8,
+                    b"custom_mode" => custom_mode = parse_i64(num) as u32,
+                    b"mavlink_version" => mavlink_version = parse_i64(num) as u8,
+                    _ => {}
+                },
+                Value::String(s) => match key {
+                    b"type" => match enum_ctx {
+                        EnumCtx::MavType => mavtype = lookup_name(&MAV_TYPE_NAMES, s),
+                        EnumCtx::Autopilot => autopilot = lookup_name(&MAV_AUTOPILOT_NAMES, s),
+                        EnumCtx::State => system_status = lookup_name(&MAV_STATE_NAMES, s),
+                        EnumCtx::None => {}
+                    },
+                    b"base_mode" => base_mode = parse_base_mode(s),
+                    _ => {}
+                },
+                Value::EnterObject => {
+                    enum_ctx = match key {
+                        b"mavtype" => EnumCtx::MavType,
+                        b"autopilot" => EnumCtx::Autopilot,
+                        b"system_status" => EnumCtx::State,
+                        _ => enum_ctx,
+                    };
+                }
+                Value::EnterArray => {}
+            }
+        }
+
+        let mut payload = [0u8; HEARTBEAT_PAYLOAD_LEN];
+        payload[0..4].copy_from_slice(&custom_mode.to_le_bytes());
+        payload[4] = mavtype;
+        payload[5] = autopilot;
+        payload[6] = base_mode;
+        payload[7] = system_status;
+        payload[8] = mavlink_version;
+
+        build_v2_frame(HEARTBEAT_ID, system_id, component_id, sequence, &payload)
+    }
+
+    enum EnumCtx {
+        None,
+        MavType,
+        Autopilot,
+        State,
+    }
+
+    /// Reverse of [`name_or_empty`]: finds the integer value whose name equals `s`.
+    #[inline(always)]
+    fn lookup_name(table: &[&'static [u8]], s: &[u8]) -> u8 {
+        table.iter().position(|name| *name == s).unwrap_or(0) as u8
+    }
+
+    /// Reverse of [`put_base_mode`]: `" | "`-joined flag names back into a bitmask.
+    fn parse_base_mode(s: &[u8]) -> u8 {
+        if s.is_empty() {
+            return 0;
+        }
+        let mut bits = 0u8;
+        for name in s.split(|&b| b == b'|') {
+            let name = trim_ascii(name);
+            if let Some(index) = MAV_MODE_FLAG_NAMES.iter().position(|flag| *flag == name) {
+                bits |= 1u8 << index;
+            }
+        }
+        bits
+    }
+
+    #[inline(always)]
+    fn trim_ascii(mut s: &[u8]) -> &[u8] {
+        while let [first, rest @ ..] = s {
+            if first.is_ascii_whitespace() {
+                s = rest;
+            } else {
+                break;
+            }
+        }
+        while let [rest @ .., last] = s {
+            if last.is_ascii_whitespace() {
+                s = rest;
+            } else {
+                break;
+            }
+        }
+        s
+    }
+
+    /// A whitespace- and order-tolerant scalar-key/value scanner over MAVLinkJSON text.
+    ///
+    /// It walks the byte stream, descending into nested objects/arrays, and yields each
+    /// `"key": <scalar>` pair (or the fact that a key opens an object/array). This is enough for
+    /// the flat MAVLinkJSON layout without a full JSON parser.
+    struct Scanner<'a> {
+        bytes: &'a [u8],
+        pos: usize,
+    }
+
+    enum Value<'a> {
+        Number(&'a [u8]),
+        String(&'a [u8]),
+        EnterObject,
+        EnterArray,
+    }
+
+    impl<'a> Scanner<'a> {
+        #[inline(always)]
+        fn new(bytes: &'a [u8]) -> Self {
+            Self { bytes, pos: 0 }
+        }
+
+        fn next_scalar(&mut self) -> Option<(&'a [u8], Value<'a>)> {
+            let n = self.bytes.len();
+            while self.pos < n {
+                if self.bytes[self.pos] != b'"' {
+                    self.pos += 1;
+                    continue;
+                }
+
+                let key = self.read_string();
+                self.skip_ws();
+                if self.pos >= n || self.bytes[self.pos] != b':' {
+                    // The quoted token was a string value, not a key.
+                    continue;
+                }
+                self.pos += 1;
+                self.skip_ws();
+                if self.pos >= n {
+                    break;
+                }
+
+                let value = match self.bytes[self.pos] {
+                    b'"' => Value::String(self.read_string()),
+                    b'{' => {
+                        self.pos += 1;
+                        Value::EnterObject
+                    }
+                    b'[' => {
+                        self.pos += 1;
+                        Value::EnterArray
+                    }
+                    _ => Value::Number(self.read_number()),
+                };
+                return Some((key, value));
+            }
+            None
+        }
+
+        /// Reads a quoted token, leaving `pos` past the closing quote. Assumes the current byte
+        /// is the opening quote.
+        #[inline(always)]
+        fn read_string(&mut self) -> &'a [u8] {
+            let n = self.bytes.len();
+            let start = self.pos + 1;
+            let mut end = start;
+            while end < n && self.bytes[end] != b'"' {
+                end += 1;
+            }
+            self.pos = (end + 1).min(n);
+            &self.bytes[start..end]
+        }
+
+        #[inline(always)]
+        fn read_number(&mut self) -> &'a [u8] {
+            let n = self.bytes.len();
+            let start = self.pos;
+            while self.pos < n
+                && matches!(
+                    self.bytes[self.pos],
+                    b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+                )
+            {
+                self.pos += 1;
+            }
+            &self.bytes[start..self.pos]
+        }
+
+        #[inline(always)]
+        fn skip_ws(&mut self) {
+            while self.pos < self.bytes.len() && self.bytes[self.pos].is_ascii_whitespace() {
+                self.pos += 1;
+            }
+        }
+    }
+
     /// Transcodes a `GLOBAL_POSITION_INT` frame straight to JSON, appended to `out`.
     ///
     /// Produces the exact same bytes as `serde_json::to_string(&packet.to_mavlink_json())`.
