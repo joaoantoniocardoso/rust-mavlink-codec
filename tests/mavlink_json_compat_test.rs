@@ -97,6 +97,37 @@ fn write_json_matches_to_string() {
     }
 }
 
+/// Option C spike: the hand-written GLOBAL_POSITION_INT transcoder must be byte-identical to
+/// the serde_json baseline across random field values.
+#[test]
+fn spike_global_position_int_matches_baseline() {
+    use mavlink_codec::mavlink_json::experimental;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(99);
+    let mut out: Vec<u8> = Vec::new();
+
+    for _ in 0..5000 {
+        let raw = dev_utils::create_random_v2_message_from_id(
+            &mut rng,
+            experimental::GLOBAL_POSITION_INT_ID,
+        )
+        .expect("GLOBAL_POSITION_INT must exist in the dialect");
+        let packet = Packet::V2(V2Packet::from(raw));
+
+        let baseline =
+            serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+
+        out.clear();
+        experimental::global_position_int_to_json(&packet, &mut out);
+
+        assert_eq!(
+            std::str::from_utf8(&out).unwrap(),
+            baseline,
+            "spike transcoder output diverged from serde_json baseline"
+        );
+    }
+}
+
 /// Every v2 frame must survive `JSON -> wire -> JSON` unchanged (text stability).
 #[test]
 fn roundtrip_json_wire_json_v2() {

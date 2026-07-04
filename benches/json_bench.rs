@@ -9,9 +9,13 @@ use criterion::{
     criterion_group, criterion_main, AxisScale, BenchmarkId, Criterion, PlotConfiguration,
     Throughput,
 };
-use dev_utils::create_random_v2_raw_message;
+use dev_utils::{create_random_v2_message_from_id, create_random_v2_raw_message};
 use mavlink::{dialects::ardupilotmega::MavMessage, MavlinkVersion};
-use mavlink_codec::{mavlink_json::MAVLinkJSON, v2::V2Packet, Packet};
+use mavlink_codec::{
+    mavlink_json::{experimental, MAVLinkJSON},
+    v2::V2Packet,
+    Packet,
+};
 use rand::{prelude::StdRng, SeedableRng};
 
 fn benchmark_packet_to_json(c: &mut Criterion) {
@@ -157,5 +161,71 @@ fn benchmark_json_to_packet(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, benchmark_packet_to_json, benchmark_json_to_packet);
+/// Option C spike: hand-written `GLOBAL_POSITION_INT` transcoder vs. the Option A serde path,
+/// on a stream of GLOBAL_POSITION_INT frames only.
+fn benchmark_spike_global_position_int(c: &mut Criterion) {
+    let seed = 42;
+    println!("Using seed {seed:?}");
+    let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+
+    let mut group = c.benchmark_group("packet_to_json_gpi");
+    group.confidence_level(0.95).sample_size(100);
+    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
+
+    let messages_counts: Vec<usize> = vec![1, 10, 100, 1000, 10000];
+
+    for messages_count in &messages_counts {
+        group.throughput(Throughput::Elements(*messages_count as u64));
+
+        let mut packets = Vec::with_capacity(*messages_count);
+        for _ in 0..*messages_count {
+            let raw =
+                create_random_v2_message_from_id(&mut rng, experimental::GLOBAL_POSITION_INT_ID)
+                    .unwrap();
+            packets.push(Packet::V2(V2Packet::from(raw)));
+        }
+
+        // Option A: parse + serde into a reused buffer.
+        group.bench_with_input(
+            BenchmarkId::new("write_json-reused-buf", messages_count),
+            messages_count,
+            |b, &_messages_count| {
+                let mut buf: Vec<u8> = Vec::with_capacity(4096);
+                b.iter(|| {
+                    for packet in &packets {
+                        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                        buf.clear();
+                        mavlink_json.write_json(&mut buf).unwrap();
+                        black_box(&buf);
+                    }
+                })
+            },
+        );
+
+        // Option C spike: wire bytes -> JSON directly, into a reused buffer.
+        group.bench_with_input(
+            BenchmarkId::new("spike-transcode", messages_count),
+            messages_count,
+            |b, &_messages_count| {
+                let mut buf: Vec<u8> = Vec::with_capacity(4096);
+                b.iter(|| {
+                    for packet in &packets {
+                        buf.clear();
+                        experimental::global_position_int_to_json(packet, &mut buf);
+                        black_box(&buf);
+                    }
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    benchmark_packet_to_json,
+    benchmark_json_to_packet,
+    benchmark_spike_global_position_int
+);
 criterion_main!(benches);

@@ -717,6 +717,7 @@ dependencies = [
  "dev-utils",
  "dhat",
  "futures",
+ "itoa",
  "log",
  "mavlink",
  "mavlink-codec",
