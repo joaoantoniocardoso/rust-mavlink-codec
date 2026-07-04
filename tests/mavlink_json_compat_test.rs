@@ -74,6 +74,29 @@ fn roundtrip_wire_json_wire_v1() {
     }
 }
 
+/// Option A must produce byte-identical output to the `serde_json::to_string` baseline.
+#[test]
+fn write_json_matches_to_string() {
+    let mut rng: StdRng = SeedableRng::seed_from_u64(1234);
+
+    let mut buf: Vec<u8> = Vec::new();
+
+    for _ in 0..2000 {
+        let raw = dev_utils::create_random_v2_raw_message(&mut rng);
+        let packet = Packet::V2(V2Packet::from(raw));
+        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+
+        let baseline = serde_json::to_string(&mavlink_json).unwrap();
+
+        buf.clear();
+        mavlink_json.write_json(&mut buf).unwrap();
+        assert_eq!(buf.as_slice(), baseline.as_bytes());
+
+        let bytes = mavlink_json.to_json_bytes().unwrap();
+        assert_eq!(bytes.as_ref(), baseline.as_bytes());
+    }
+}
+
 /// Every v2 frame must survive `JSON -> wire -> JSON` unchanged (text stability).
 #[test]
 fn roundtrip_json_wire_json_v2() {

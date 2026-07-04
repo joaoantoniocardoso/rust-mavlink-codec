@@ -5,6 +5,7 @@
 //! exact JSON format (see `tests/mavlink_json_compat_test.rs`) and to provide the baseline
 //! that future low-copy transcoders are measured against (see `benches/json_bench.rs`).
 
+use bytes::Bytes;
 use mavlink::{MavHeader, MavlinkVersion, Message};
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,29 @@ impl Packet {
         };
 
         Ok(MAVLinkJSON { header, message })
+    }
+}
+
+impl<M: Message + Serialize> MAVLinkJSON<M> {
+    /// Appends the JSON encoding to `buf`, reusing its allocation across calls.
+    ///
+    /// This is the Option A optimization: it produces the exact same bytes as
+    /// `serde_json::to_string(self)` but writes into a caller-owned buffer, avoiding the
+    /// per-call `String` allocation (and its trailing UTF-8 validation copy). The caller is
+    /// responsible for clearing `buf` between messages if a single message per buffer is
+    /// desired.
+    pub fn write_json(&self, buf: &mut Vec<u8>) -> serde_json::Result<()> {
+        serde_json::to_writer(buf, self)
+    }
+
+    /// Serializes the JSON into a freshly allocated [`Bytes`], ready for zero-copy fan-out.
+    ///
+    /// Intended for the dual-representation cache: this pays a single allocation, after which
+    /// the returned `Bytes` can be cloned (refcount bump) and sent to any number of consumers
+    /// for free. Uses serde_json's fast `Vec` writer and wraps the buffer into `Bytes` without
+    /// copying (`Bytes::from(Vec<u8>)` takes ownership of the allocation).
+    pub fn to_json_bytes(&self) -> serde_json::Result<Bytes> {
+        Ok(Bytes::from(serde_json::to_vec(self)?))
     }
 }
 

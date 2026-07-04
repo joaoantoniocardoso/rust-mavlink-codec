@@ -35,8 +35,9 @@ fn benchmark_packet_to_json(c: &mut Criterion) {
             ))));
         }
 
+        // Baseline: parse + `serde_json::to_string` (fresh `String` per message).
         group.bench_with_input(
-            BenchmarkId::new("rust-mavlink+serde_json", messages_count),
+            BenchmarkId::new("to_string", messages_count),
             messages_count,
             |b, &_messages_count| {
                 b.iter(|| {
@@ -44,6 +45,53 @@ fn benchmark_packet_to_json(c: &mut Criterion) {
                         let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
                         let json = serde_json::to_string(&mavlink_json).unwrap();
                         black_box(json);
+                    }
+                })
+            },
+        );
+
+        // Option A: parse + `write_json` into a single reused buffer.
+        group.bench_with_input(
+            BenchmarkId::new("write_json-reused-buf", messages_count),
+            messages_count,
+            |b, &_messages_count| {
+                let mut buf: Vec<u8> = Vec::with_capacity(4096);
+                b.iter(|| {
+                    for packet in &packets {
+                        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                        buf.clear();
+                        mavlink_json.write_json(&mut buf).unwrap();
+                        black_box(&buf);
+                    }
+                })
+            },
+        );
+
+        // Option A (dual-repr flavor): parse + `to_json_bytes` producing owned `Bytes`.
+        group.bench_with_input(
+            BenchmarkId::new("to_json_bytes", messages_count),
+            messages_count,
+            |b, &_messages_count| {
+                b.iter(|| {
+                    for packet in &packets {
+                        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                        let json = mavlink_json.to_json_bytes().unwrap();
+                        black_box(json);
+                    }
+                })
+            },
+        );
+
+        // Reference: parse only, to expose how much of the cost is the typed parse vs. the
+        // JSON serialization (informs whether Option C is worth pursuing).
+        group.bench_with_input(
+            BenchmarkId::new("parse-only", messages_count),
+            messages_count,
+            |b, &_messages_count| {
+                b.iter(|| {
+                    for packet in &packets {
+                        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                        black_box(mavlink_json);
                     }
                 })
             },
