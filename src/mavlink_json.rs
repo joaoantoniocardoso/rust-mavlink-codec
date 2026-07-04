@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::Packet;
 
 pub mod generated;
+pub mod message;
 pub mod rt;
+
+pub use message::MAVLinkMessage;
 
 /// Improved and back-compatible with our previous struct called `MAVLinkMessage`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

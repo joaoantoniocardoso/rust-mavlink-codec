@@ -1,0 +1,149 @@
+//! Dual-representation message envelope for fan-out routing.
+//!
+//! [`MAVLinkMessage`] holds a message as its wire [`Packet`] and/or its MAVLinkJSON text
+//! ([`Bytes`]), materializing the missing side lazily (and once) from the one it was built with.
+//! Both representations are reference-counted, so cloning the envelope and handing each sink its
+//! preferred form is cheap: a binary sink takes the `Packet` bytes, a JSON sink clones the
+//! `Bytes`, and a frame is transcoded at most once regardless of the number of consumers.
+//!
+//! Router semantics: the source representation is always preserved, so a frame we cannot transcode
+//! (an unknown message id on the wire side, or an unknown `"type"` on the JSON side) still flows to
+//! sinks of its own kind — only the other representation is unavailable ([`None`]).
+
+use std::sync::OnceLock;
+
+use bytes::Bytes;
+
+use crate::mavlink_json::generated;
+use crate::Packet;
+
+/// A message carried as its wire [`Packet`] and/or MAVLinkJSON text, each materialized on demand.
+#[derive(Debug, Default)]
+pub struct MAVLinkMessage {
+    wire: OnceLock<Option<Packet>>,
+    json: OnceLock<Option<Bytes>>,
+}
+
+impl MAVLinkMessage {
+    /// Creates an envelope from a wire [`Packet`]; the JSON side is transcoded on first request.
+    pub fn from_packet(packet: Packet) -> Self {
+        let wire = OnceLock::new();
+        let _ = wire.set(Some(packet));
+        Self {
+            wire,
+            json: OnceLock::new(),
+        }
+    }
+
+    /// Creates an envelope from MAVLinkJSON text; the wire side is transcoded on first request.
+    pub fn from_json(json: impl Into<Bytes>) -> Self {
+        let cell = OnceLock::new();
+        let _ = cell.set(Some(json.into()));
+        Self {
+            wire: OnceLock::new(),
+            json: cell,
+        }
+    }
+
+    /// The wire representation, transcoding it from JSON on first access if needed.
+    ///
+    /// Returns [`None`] only for a JSON-sourced message whose `"type"` is not in the compiled
+    /// dialect (or whose text is malformed); a wire-sourced message always yields its `Packet`.
+    pub fn wire(&self) -> Option<&Packet> {
+        self.wire
+            .get_or_init(|| {
+                let json = self.json.get()?.as_ref()?;
+                Packet::from_json_transcoded(json)
+            })
+            .as_ref()
+    }
+
+    /// The MAVLinkJSON representation, transcoding it from the wire frame on first access if needed.
+    ///
+    /// Returns [`None`] only for a wire-sourced message whose id is not in the compiled dialect; a
+    /// JSON-sourced message always yields its text.
+    pub fn json(&self) -> Option<&Bytes> {
+        self.json
+            .get_or_init(|| {
+                let packet = self.wire.get()?.as_ref()?;
+                let mut buf = Vec::with_capacity(256);
+                packet
+                    .write_json_transcoded(&mut buf)
+                    .then(|| Bytes::from(buf))
+            })
+            .as_ref()
+    }
+
+    /// The MAVLink message id, resolved as cheaply as possible.
+    ///
+    /// Uses the wire frame when available; otherwise resolves the JSON `"type"` tag against the
+    /// dialect without transcoding the whole frame. Returns [`None`] for a JSON-sourced message
+    /// with an unknown `"type"`.
+    pub fn message_id(&self) -> Option<u32> {
+        if let Some(Some(packet)) = self.wire.get() {
+            return Some(packet.message_id());
+        }
+        let json = self.json.get()?.as_ref()?;
+        let name = json_type_tag(json)?;
+        generated::descriptor_by_name(name).map(|desc| desc.id)
+    }
+
+    /// Whether the wire representation is already materialized (no transcoding on next `wire()`).
+    pub fn has_wire(&self) -> bool {
+        matches!(self.wire.get(), Some(Some(_)))
+    }
+
+    /// Whether the JSON representation is already materialized (no transcoding on next `json()`).
+    pub fn has_json(&self) -> bool {
+        matches!(self.json.get(), Some(Some(_)))
+    }
+}
+
+impl Clone for MAVLinkMessage {
+    /// Clones whichever representations are already materialized (each a cheap refcount bump),
+    /// so a clone never re-transcodes what the original already computed.
+    fn clone(&self) -> Self {
+        let wire = OnceLock::new();
+        if let Some(cached) = self.wire.get() {
+            let _ = wire.set(cached.clone());
+        }
+        let json = OnceLock::new();
+        if let Some(cached) = self.json.get() {
+            let _ = json.set(cached.clone());
+        }
+        Self { wire, json }
+    }
+}
+
+impl From<Packet> for MAVLinkMessage {
+    fn from(packet: Packet) -> Self {
+        Self::from_packet(packet)
+    }
+}
+
+/// Returns the value of the first `"type":"NAME"` member (the MAVLinkJSON message tag, which serde
+/// and the transcoder both emit before any field). Names carry no escapes, so the raw slice is
+/// returned. Reads only up to the tag, avoiding a full parse.
+fn json_type_tag(json: &[u8]) -> Option<&[u8]> {
+    const NEEDLE: &[u8] = b"\"type\":";
+    let mut i = 0;
+    while i + NEEDLE.len() <= json.len() {
+        if &json[i..i + NEEDLE.len()] == NEEDLE {
+            let mut j = i + NEEDLE.len();
+            while json.get(j)?.is_ascii_whitespace() {
+                j += 1;
+            }
+            if *json.get(j)? != b'"' {
+                return None;
+            }
+            j += 1;
+            let start = j;
+            while *json.get(j)? != b'"' {
+                j += 1;
+            }
+            return Some(&json[start..j]);
+        }
+        i += 1;
+    }
+    None
+}
