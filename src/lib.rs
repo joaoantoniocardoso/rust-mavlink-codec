@@ -1,5 +1,7 @@
 pub mod codec;
 pub mod error;
+#[cfg(feature = "json")]
+pub mod mavlink_json;
 pub mod rust_mavlink_compatibility;
 pub mod signing;
 pub mod v1;

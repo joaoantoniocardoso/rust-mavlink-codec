@@ -25,6 +25,8 @@ debug = 1
 bytes = "1.12"
 log = "0.4"
 mavlink = { version = "0.18.0", default-features = false, features = ["std", "dialect-ardupilotmega", "mav2-message-signing"] }
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 sha2 = "0.11"
 thiserror = "2.0"
 tokio-util = { version = "0.7", features = ["codec"] }
@@ -32,6 +34,9 @@ tokio-util = { version = "0.7", features = ["codec"] }
 [features]
 default = ["std"]
 std = []
+# Enables the typed MAVLinkJSON layer (rust-mavlink + serde baseline) used to
+# transcode between `Packet` wire frames and JSON text.
+json = ["dep:serde", "dep:serde_json", "mavlink/serde"]
 # Enables the C reference (c_library_v2) decode benchmark arm. Requires the
 # third_party/c_library_v2 git submodule and a C compiler.
 bench-c-reference = []
@@ -45,8 +50,12 @@ criterion = { version =  "0.8", features = ["async_tokio"] }
 dev-utils = { path = "dev_utils" }
 dhat = "0.3"
 futures = "0.3"
-mavlink = { version = "0.18.0", default-features = false, features = ["std", "dialect-ardupilotmega", "mav2-message-signing", "arbitrary"] }
+mavlink = { version = "0.18.0", default-features = false, features = ["std", "dialect-ardupilotmega", "mav2-message-signing", "arbitrary", "serde"] }
+# Self dev-dependency to enable the `json` feature for tests, benches and examples
+# without turning it on for the default library build.
+mavlink-codec = { path = ".", features = ["json"] }
 rand = "0.9"
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tokio-util = "0.7"
@@ -58,4 +67,8 @@ harness = false
 
 [[bench]]
 name = "compatibility_bench"
+harness = false
+
+[[bench]]
+name = "json_bench"
 harness = false
