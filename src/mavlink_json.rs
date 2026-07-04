@@ -11,6 +11,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::Packet;
 
+pub mod generated;
+pub mod rt;
+
 /// Improved and back-compatible with our previous struct called `MAVLinkMessage`.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct MAVLinkJSON<T: Message> {
@@ -53,6 +56,20 @@ impl Packet {
         };
 
         Ok(MAVLinkJSON { header, message })
+    }
+
+    /// Transcodes this frame straight to MAVLinkJSON text via the generated descriptor tables,
+    /// appending to `out`. Returns `false` (leaving `out` untouched) if the message id is not
+    /// covered by the generator. Produces the exact same bytes as serializing
+    /// [`Packet::to_mavlink_json`] with `serde_json`, without a typed parse or serde.
+    pub fn write_json_transcoded(&self, out: &mut Vec<u8>) -> bool {
+        match generated::descriptor(self.message_id()) {
+            Some(desc) => {
+                rt::to_json(self, desc, out);
+                true
+            }
+            None => false,
+        }
     }
 }
 

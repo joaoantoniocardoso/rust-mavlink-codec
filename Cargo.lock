@@ -720,6 +720,7 @@ dependencies = [
  "itoa",
  "log",
  "mavlink",
+ "mavlink-bindgen",
  "mavlink-codec",
  "num-traits",
  "phf",

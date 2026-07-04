@@ -1,0 +1,7 @@
+MAVLink message definitions vendored verbatim from the `mavlink` crate v0.18.0
+(crates.io), path `mavlink/message_definitions/v1.0/`.
+
+These are the exact XML files rust-mavlink 0.18 compiles into its typed dialects,
+so the descriptor tables generated from them (build.rs) match the serde JSON
+baseline byte-for-byte. To refresh on a `mavlink` version bump, re-copy from the
+matching crate source (see xtask).

@@ -286,13 +286,25 @@ fn benchmark_spike(c: &mut Criterion) {
             })
         });
 
-        // Option C spike: wire bytes -> JSON directly, into a reused buffer.
+        // Option C spike: hand-written wire bytes -> JSON directly, into a reused buffer.
         group.bench_function("spike-transcode", |b| {
             let mut buf: Vec<u8> = Vec::with_capacity(4096);
             b.iter(|| {
                 for packet in &packets {
                     buf.clear();
                     transcode(packet, &mut buf);
+                    black_box(&buf);
+                }
+            })
+        });
+
+        // Generated: descriptor table + generic interpreter (the shippable path), reused buffer.
+        group.bench_function("generated-transcode", |b| {
+            let mut buf: Vec<u8> = Vec::with_capacity(4096);
+            b.iter(|| {
+                for packet in &packets {
+                    buf.clear();
+                    packet.write_json_transcoded(&mut buf);
                     black_box(&buf);
                 }
             })
