@@ -115,6 +115,87 @@ fn benchmark_per_field_egress(c: &mut Criterion) {
     group.finish();
 }
 
+fn benchmark_per_field_egress_gps_status(c: &mut Criterion) {
+    let seed = 42;
+    let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+
+    let mut packets = Vec::with_capacity(N);
+    for _ in 0..N {
+        let raw = create_random_v2_message_from_id(&mut rng, experimental::GPS_STATUS_ID).unwrap();
+        packets.push(Packet::V2(V2Packet::from(raw)));
+    }
+
+    let mut group = c.benchmark_group("per_field_egress/gps_status");
+    group.confidence_level(0.95).sample_size(100);
+    group.throughput(Throughput::Elements(N as u64));
+
+    // Strategy 1: serde_json::to_value + per-field serialization (today's mavlink-server path).
+    group.bench_function("to_value", |b| {
+        b.iter(|| {
+            for packet in &packets {
+                let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                let full = Bytes::from(serde_json::to_vec(&mavlink_json).unwrap());
+                black_box(&full);
+
+                let value = serde_json::to_value(&mavlink_json.message).unwrap();
+                for (name, field) in value.as_object().unwrap() {
+                    if name == "type" {
+                        continue;
+                    }
+                    let field_bytes = Bytes::from(serde_json::to_vec(field).unwrap());
+                    black_box((name, field_bytes));
+                }
+            }
+        })
+    });
+
+    // Strategy 2: phf name->getter map, each getter appends canonical JSON bytes.
+    group.bench_function("phf-getters", |b| {
+        let mut full = Vec::with_capacity(1024);
+        let mut field = Vec::with_capacity(128);
+        b.iter(|| {
+            for packet in &packets {
+                full.clear();
+                experimental::gps_status_to_json(packet, &mut full);
+                black_box(Bytes::copy_from_slice(&full));
+
+                let mut payload = [0u8; 101];
+                let src = packet.payload();
+                let n = src.len().min(101);
+                payload[..n].copy_from_slice(&src[..n]);
+
+                for (name, getter) in GPS_STATUS_FIELD_GETTERS.entries() {
+                    field.clear();
+                    getter(&payload, &mut field);
+                    black_box((name, Bytes::copy_from_slice(&field)));
+                }
+            }
+        })
+    });
+
+    // Strategy 3: single transcode pass -> whole-message blob + per-field zero-copy slices.
+    group.bench_function("range-index", |b| {
+        let mut out = Vec::with_capacity(1024);
+        b.iter(|| {
+            for packet in &packets {
+                out.clear();
+                let mut ranges = [(0u32, 0u32); 6];
+                experimental::gps_status_to_json_indexed(packet, &mut out, &mut ranges);
+                let blob = Bytes::copy_from_slice(&out);
+                black_box(&blob);
+
+                for (i, name) in experimental::GPS_STATUS_FIELD_NAMES.iter().enumerate() {
+                    let (start, end) = ranges[i];
+                    let field = blob.slice(start as usize..end as usize);
+                    black_box((name, field));
+                }
+            }
+        })
+    });
+
+    group.finish();
+}
+
 type FieldGetter = fn(&[u8], &mut Vec<u8>);
 
 static GPI_FIELD_GETTERS: phf::Map<&'static str, FieldGetter> = phf::phf_map! {
@@ -129,10 +210,31 @@ static GPI_FIELD_GETTERS: phf::Map<&'static str, FieldGetter> = phf::phf_map! {
     "hdg" => (|p, o| put_int(o, rd_u16(p, 26))) as FieldGetter,
 };
 
+static GPS_STATUS_FIELD_GETTERS: phf::Map<&'static str, FieldGetter> = phf::phf_map! {
+    "satellites_visible" => (|p, o| put_int(o, p[0])) as FieldGetter,
+    "satellite_prn" => (|p, o| put_u8_array(o, &p[1..21])) as FieldGetter,
+    "satellite_used" => (|p, o| put_u8_array(o, &p[21..41])) as FieldGetter,
+    "satellite_elevation" => (|p, o| put_u8_array(o, &p[41..61])) as FieldGetter,
+    "satellite_azimuth" => (|p, o| put_u8_array(o, &p[61..81])) as FieldGetter,
+    "satellite_snr" => (|p, o| put_u8_array(o, &p[81..101])) as FieldGetter,
+};
+
 #[inline(always)]
 fn put_int<I: itoa::Integer>(out: &mut Vec<u8>, value: I) {
     let mut buffer = itoa::Buffer::new();
     out.extend_from_slice(buffer.format(value).as_bytes());
+}
+
+#[inline(always)]
+fn put_u8_array(out: &mut Vec<u8>, values: &[u8]) {
+    out.push(b'[');
+    for (i, value) in values.iter().enumerate() {
+        if i != 0 {
+            out.push(b',');
+        }
+        put_int(out, *value);
+    }
+    out.push(b']');
 }
 
 #[inline(always)]
@@ -155,5 +257,9 @@ fn rd_u16(p: &[u8], o: usize) -> u16 {
     u16::from_le_bytes([p[o], p[o + 1]])
 }
 
-criterion_group!(benches, benchmark_per_field_egress);
+criterion_group!(
+    benches,
+    benchmark_per_field_egress,
+    benchmark_per_field_egress_gps_status
+);
 criterion_main!(benches);

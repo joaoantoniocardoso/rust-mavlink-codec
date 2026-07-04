@@ -693,6 +693,65 @@ pub mod experimental {
         out.extend_from_slice(br#"}}"#);
     }
 
+    /// Field names of `GPS_STATUS`, in wire/serialization order.
+    ///
+    /// Parallel to the range table filled by [`gps_status_to_json_indexed`].
+    pub static GPS_STATUS_FIELD_NAMES: [&str; 6] = [
+        "satellites_visible",
+        "satellite_prn",
+        "satellite_used",
+        "satellite_elevation",
+        "satellite_azimuth",
+        "satellite_snr",
+    ];
+
+    /// Range-indexed variant of [`gps_status_to_json`]: writes the full MAVLinkJSON to `out` and
+    /// records the byte range of each field's *value* into `ranges`.
+    ///
+    /// Unlike scalar messages, five of the six fields are 20-element arrays, so re-serializing a
+    /// field on demand (the `phf`-getter path) re-emits ~100 array elements. The range index
+    /// makes each of those a zero-copy `bytes.slice(..)` of the single whole-message blob.
+    pub fn gps_status_to_json_indexed(
+        packet: &Packet,
+        out: &mut Vec<u8>,
+        ranges: &mut [(u32, u32); 6],
+    ) {
+        let mut p = [0u8; GPS_STATUS_PAYLOAD_LEN];
+        let payload = packet.payload();
+        let n = payload.len().min(GPS_STATUS_PAYLOAD_LEN);
+        p[..n].copy_from_slice(&payload[..n]);
+
+        macro_rules! put_scalar_field {
+            ($idx:expr, $sep:expr, $value:expr) => {{
+                out.extend_from_slice($sep);
+                let start = out.len() as u32;
+                put_int(out, $value);
+                ranges[$idx] = (start, out.len() as u32);
+            }};
+        }
+        macro_rules! put_array_field {
+            ($idx:expr, $sep:expr, $values:expr) => {{
+                out.extend_from_slice($sep);
+                let start = out.len() as u32;
+                put_u8_array(out, $values);
+                ranges[$idx] = (start, out.len() as u32);
+            }};
+        }
+
+        put_header(packet, out);
+        put_scalar_field!(
+            0,
+            br#","message":{"type":"GPS_STATUS","satellites_visible":"#,
+            p[0]
+        );
+        put_array_field!(1, br#","satellite_prn":"#, &p[1..21]);
+        put_array_field!(2, br#","satellite_used":"#, &p[21..41]);
+        put_array_field!(3, br#","satellite_elevation":"#, &p[41..61]);
+        put_array_field!(4, br#","satellite_azimuth":"#, &p[61..81]);
+        put_array_field!(5, br#","satellite_snr":"#, &p[81..101]);
+        out.extend_from_slice(br#"}}"#);
+    }
+
     /// MAVLink message id for `HEARTBEAT`.
     pub const HEARTBEAT_ID: u32 = 0;
     const HEARTBEAT_PAYLOAD_LEN: usize = 9;

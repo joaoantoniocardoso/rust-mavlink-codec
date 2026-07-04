@@ -356,6 +356,43 @@ fn spike_global_position_int_indexed_matches_baseline() {
     }
 }
 
+/// Range-indexed transcoder for the array-bearing GPS_STATUS: blob + every field value-range
+/// (including the 20-element arrays) must match serde_json exactly.
+#[test]
+fn spike_gps_status_indexed_matches_baseline() {
+    use mavlink_codec::mavlink_json::experimental;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(4321);
+
+    for _ in 0..3000 {
+        let raw =
+            dev_utils::create_random_v2_message_from_id(&mut rng, experimental::GPS_STATUS_ID)
+                .unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+
+        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+        let expected_full = serde_json::to_string(&mavlink_json).unwrap();
+        let expected_fields = serde_json::to_value(&mavlink_json.message).unwrap();
+
+        let mut out = Vec::new();
+        let mut ranges = [(0u32, 0u32); 6];
+        experimental::gps_status_to_json_indexed(&packet, &mut out, &mut ranges);
+
+        assert_eq!(out, expected_full.as_bytes());
+
+        for (i, name) in experimental::GPS_STATUS_FIELD_NAMES.iter().enumerate() {
+            let (start, end) = ranges[i];
+            let field_slice = &out[start as usize..end as usize];
+            let expected_value = serde_json::to_string(&expected_fields[*name]).unwrap();
+            assert_eq!(
+                field_slice,
+                expected_value.as_bytes(),
+                "field {name} mismatch"
+            );
+        }
+    }
+}
+
 fn build_packet(message: &MavMessage) -> Packet {
     let header = mavlink::MavHeader {
         system_id: 42,
