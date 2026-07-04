@@ -4,18 +4,10 @@ use std::path::{Path, PathBuf};
 
 use mavlink_bindgen::parser::{extra_crc, parse_profile, MavEnum, MavField, MavProfile, MavType};
 
-/// Messages the generated transcoders currently cover. Grows toward the full dialect; kept as an
-/// allowlist so every generated message is backed by a property test before it ships.
-const SUBSET: &[&str] = &[
-    "HEARTBEAT",
-    "GLOBAL_POSITION_INT",
-    "ATTITUDE",
-    "GPS_STATUS",
-    "STATUSTEXT",
-];
-
 /// Top-level dialect parsed for descriptors; its includes pull in `common.xml` etc. This matches
-/// the `dialect-ardupilotmega` feature the `mavlink` baseline is compiled with.
+/// the `dialect-ardupilotmega` feature the `mavlink` baseline is compiled with. Every message in
+/// the resolved profile gets a descriptor; correctness is enforced by the whole-dialect property
+/// test against the `rust-mavlink` + `serde_json` baseline.
 const DIALECT: &str = "ardupilotmega.xml";
 
 fn main() {
@@ -50,11 +42,8 @@ fn emit_module(profile: &MavProfile) -> String {
     let mut dispatch = String::new();
     let mut dispatch_by_name = String::new();
 
-    for name in SUBSET {
-        let msg = profile
-            .messages
-            .get(*name)
-            .unwrap_or_else(|| panic!("message {name} not found in dialect"));
+    for msg in profile.messages.values() {
+        let name = &msg.name;
 
         let mut offset: usize = 0;
         let mut fields = String::new();
@@ -114,37 +103,33 @@ fn emit_module(profile: &MavProfile) -> String {
 
 /// Renders the `FieldKind` constructor for a field, registering any enum/bitmask name table it
 /// needs into `enum_tables` (keyed by the generated static ident, so each is emitted once).
+///
+/// Aggregate types are matched first: rust-mavlink's `emit_type` renders any array with the
+/// primitive element type (the `enum=` attribute is ignored for arrays), so an enum/bitmask array
+/// serializes as a plain numeric array and is treated as one here.
 fn field_kind(
     profile: &MavProfile,
     field: &MavField,
     enum_tables: &mut BTreeMap<String, String>,
 ) -> String {
-    if let Some(enum_name) = &field.enumtype {
-        // Enum arrays are not covered yet; the SUBSET must avoid them.
-        if let MavType::Array(inner, len) = &field.mavtype {
-            let _ = (inner, len);
-            panic!(
-                "field {} is an enum array; not supported by the generator yet",
-                field.name
-            );
-        }
-        let table_ident = enum_table_ident(enum_name);
-        enum_tables
-            .entry(table_ident.clone())
-            .or_insert_with(|| emit_enum_table(profile, enum_name, &table_ident));
-        let sk = scalar_kind(&field.mavtype);
-        if field.display.as_deref() == Some("bitmask") {
-            format!("FieldKind::Bitmask({table_ident}, {sk})")
-        } else {
-            format!("FieldKind::Enum({table_ident}, {sk})")
-        }
-    } else {
-        match &field.mavtype {
-            MavType::CharArray(len) => format!("FieldKind::CharArray({len})"),
-            MavType::Array(inner, len) => {
-                format!("FieldKind::Array({}, {len})", scalar_kind(inner))
+    match &field.mavtype {
+        MavType::CharArray(len) => format!("FieldKind::CharArray({len})"),
+        MavType::Array(inner, len) => format!("FieldKind::Array({}, {len})", scalar_kind(inner)),
+        scalar => {
+            if let Some(enum_name) = &field.enumtype {
+                let table_ident = enum_table_ident(enum_name);
+                enum_tables
+                    .entry(table_ident.clone())
+                    .or_insert_with(|| emit_enum_table(profile, enum_name, &table_ident));
+                let sk = scalar_kind(scalar);
+                if field.display.as_deref() == Some("bitmask") {
+                    format!("FieldKind::Bitmask({table_ident}, {sk})")
+                } else {
+                    format!("FieldKind::Enum({table_ident}, {sk})")
+                }
+            } else {
+                format!("FieldKind::Scalar({})", scalar_kind(scalar))
             }
-            other => format!("FieldKind::Scalar({})", scalar_kind(other)),
         }
     }
 }

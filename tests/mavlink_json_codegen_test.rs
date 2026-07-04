@@ -6,25 +6,29 @@
 //! they scale to the whole dialect.
 
 use mavlink::dialects::ardupilotmega::MavMessage;
+use mavlink_codec::mavlink_json::generated;
 use mavlink_codec::{v2::V2Packet, Packet};
 use rand::{prelude::StdRng, SeedableRng};
 
-/// Message ids currently emitted by the generator (kept in sync with `SUBSET` in `build.rs`).
-const SUBSET_IDS: &[u32] = &[
-    0,   // HEARTBEAT (enums + bitmask)
-    25,  // GPS_STATUS (numeric arrays)
-    30,  // ATTITUDE (floats, incl. non-finite -> null)
-    33,  // GLOBAL_POSITION_INT (signed/unsigned ints)
-    253, // STATUSTEXT (enum + char array)
-];
+/// Every message id in the compiled dialect must be covered by the generator, so the two paths
+/// stay in lockstep with the `rust-mavlink` baseline the tests compare against.
+#[test]
+fn generator_covers_whole_dialect() {
+    for &(name, id) in dev_utils::all_message_ids() {
+        assert!(
+            generated::descriptor(id).is_some(),
+            "id {id} ({name}) is in the dialect but has no generated descriptor"
+        );
+    }
+}
 
 #[test]
 fn generated_transcoder_matches_serde_baseline() {
     let mut rng: StdRng = SeedableRng::seed_from_u64(0xC0DE_1234);
     let mut out: Vec<u8> = Vec::new();
 
-    for &id in SUBSET_IDS {
-        for _ in 0..5000 {
+    for &(name, id) in dev_utils::all_message_ids() {
+        for _ in 0..200 {
             let raw = dev_utils::create_random_v2_message_from_id(&mut rng, id)
                 .unwrap_or_else(|| panic!("id {id} must exist in the dialect"));
             let packet = Packet::V2(V2Packet::from(raw));
@@ -35,13 +39,13 @@ fn generated_transcoder_matches_serde_baseline() {
             out.clear();
             assert!(
                 packet.write_json_transcoded(&mut out),
-                "id {id} is not covered by the generator"
+                "id {id} ({name}) is not covered by the generator"
             );
 
             assert_eq!(
                 std::str::from_utf8(&out).unwrap(),
                 baseline,
-                "generated transcoder diverged from serde_json baseline for id {id}"
+                "generated transcoder diverged from serde_json baseline for id {id} ({name})"
             );
         }
     }
@@ -51,15 +55,15 @@ fn generated_transcoder_matches_serde_baseline() {
 /// field range must slice out exactly that field's serde_json encoding.
 #[test]
 fn generated_indexed_ranges_match_serde_fields() {
-    use mavlink_codec::mavlink_json::{generated, rt};
+    use mavlink_codec::mavlink_json::rt;
 
     let mut rng: StdRng = SeedableRng::seed_from_u64(0x00F1_E1D5);
     let mut out: Vec<u8> = Vec::new();
-    let mut ranges = [(0u32, 0u32); 64];
 
-    for &id in SUBSET_IDS {
+    for &(name, id) in dev_utils::all_message_ids() {
         let desc = generated::descriptor(id).unwrap();
-        for _ in 0..3000 {
+        let mut ranges = vec![(0u32, 0u32); desc.fields.len()];
+        for _ in 0..120 {
             let raw = dev_utils::create_random_v2_message_from_id(&mut rng, id).unwrap();
             let packet = Packet::V2(V2Packet::from(raw));
 
@@ -68,19 +72,26 @@ fn generated_indexed_ranges_match_serde_fields() {
 
             out.clear();
             rt::to_json_indexed(&packet, desc, &mut out, &mut ranges);
-            assert_eq!(out, expected_full.as_bytes(), "blob mismatch for id {id}");
+            assert_eq!(
+                out,
+                expected_full.as_bytes(),
+                "blob mismatch for id {id} ({name})"
+            );
 
             // Extract each field value straight from the (correct) baseline text. Going through
             // `serde_json::to_value` would upcast f32 fields to f64 and add digits, so it can't
-            // be used as the per-field oracle for float messages.
+            // be used as the per-field oracle for float messages. Search only within the message
+            // body: the header carries keys (e.g. `message_id`) that some messages reuse as field
+            // names.
+            let body = &expected_full[expected_full.find("\"message\":{").unwrap()..];
             for (i, field) in desc.fields.iter().enumerate() {
                 let (start, end) = ranges[i];
                 let slice = &out[start as usize..end as usize];
-                let expected = field_value_in(&expected_full, field.name);
+                let expected = field_value_in(body, field.name);
                 assert_eq!(
                     slice,
                     expected.as_bytes(),
-                    "field {} mismatch for id {id}",
+                    "field {} mismatch for id {id} ({name})",
                     field.name
                 );
             }
@@ -95,11 +106,12 @@ fn generated_from_json_matches_serde_baseline() {
     use mavlink::MavlinkVersion;
     use mavlink_codec::mavlink_json::MAVLinkJSON;
 
-    use mavlink_codec::mavlink_json::{generated, rt::FieldKind};
+    use mavlink_codec::mavlink_json::rt::FieldKind;
 
     let mut rng: StdRng = SeedableRng::seed_from_u64(0x0FF_1234);
+    let mut total_tested = 0u64;
 
-    for &id in SUBSET_IDS {
+    for &(name, id) in dev_utils::all_message_ids() {
         // Naive `:`/`,` -> spaced replacement corrupts the interior of char-array string values,
         // so only exercise whitespace tolerance on messages without one. The scanner structure is
         // still covered by the other messages (incl. enum objects and bitmask strings).
@@ -109,7 +121,7 @@ fn generated_from_json_matches_serde_baseline() {
             .iter()
             .any(|f| matches!(f.kind, FieldKind::CharArray(_)));
         let mut tested = 0;
-        for _ in 0..8000 {
+        for _ in 0..300 {
             let raw = dev_utils::create_random_v2_message_from_id(&mut rng, id).unwrap();
             let packet = Packet::V2(V2Packet::from(raw));
 
@@ -126,11 +138,11 @@ fn generated_from_json_matches_serde_baseline() {
             let baseline_packet = baseline.to_packet(MavlinkVersion::V2);
 
             let transcoded = Packet::from_json_transcoded(json.as_bytes())
-                .unwrap_or_else(|| panic!("id {id} not covered by reverse generator"));
+                .unwrap_or_else(|| panic!("id {id} ({name}) not covered by reverse generator"));
             assert_eq!(
                 transcoded.as_slice(),
                 baseline_packet.as_slice(),
-                "reverse transcoder diverged for id {id}: {json}"
+                "reverse transcoder diverged for id {id} ({name}): {json}"
             );
 
             // Whitespace tolerance: the parser must reproduce the same frame.
@@ -140,14 +152,19 @@ fn generated_from_json_matches_serde_baseline() {
                 assert_eq!(
                     spaced_packet.as_slice(),
                     baseline_packet.as_slice(),
-                    "reverse transcoder whitespace intolerance for id {id}"
+                    "reverse transcoder whitespace intolerance for id {id} ({name})"
                 );
             }
 
             tested += 1;
         }
-        assert!(tested > 100, "too few samples for id {id}: {tested}");
+        assert!(tested > 0, "no non-null samples for id {id} ({name})");
+        total_tested += tested;
     }
+    assert!(
+        total_tested > 10_000,
+        "suspiciously few reverse samples across the dialect: {total_tested}"
+    );
 }
 
 /// Returns the raw JSON value token that follows `"key":` in `json` (a balanced number, string,

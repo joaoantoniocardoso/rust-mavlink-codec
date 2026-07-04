@@ -607,8 +607,9 @@ fn parse_bitmask(table: &[(u64, &'static str)], s: &[u8]) -> u64 {
 /// Builds a MAVLink v2 frame (STX, header, trailing-zero-trimmed payload, CRC), byte-identical to
 /// rust-mavlink's `serialize_message`.
 fn build_v2_frame(desc: &MsgDesc, sys: u8, comp: u8, seq: u8, payload: &[u8]) -> Packet {
+    // MAVLink v2 keeps at least one payload byte (see mavlink-core `remove_trailing_zeroes`).
     let mut len = payload.len();
-    while len > 0 && payload[len - 1] == 0 {
+    while len > 1 && payload[len - 1] == 0 {
         len -= 1;
     }
 
