@@ -85,11 +85,174 @@ impl<M: Message + Serialize> MAVLinkJSON<M> {
 /// This exists only to measure the achievable ceiling for one representative message before
 /// investing in `build.rs`-generated descriptor tables for the whole dialect.
 pub mod experimental {
-    use crate::Packet;
+    use bytes::Bytes;
+
+    use crate::{v2::V2Packet, Packet};
 
     /// MAVLink message id for `GLOBAL_POSITION_INT`.
     pub const GLOBAL_POSITION_INT_ID: u32 = 33;
     const GLOBAL_POSITION_INT_PAYLOAD_LEN: usize = 28;
+
+    /// Reverse Option C spike: parses a `GLOBAL_POSITION_INT` MAVLinkJSON string straight into a
+    /// wire [`Packet`], with no serde and no typed struct.
+    ///
+    /// Produces the exact same frame bytes as `serde_json::from_str::<MAVLinkJSON<_>>(json)`
+    /// followed by `to_packet(MavlinkVersion::V2)`. The scanner is whitespace- and
+    /// order-tolerant; integer values are written directly into the wire payload and the frame
+    /// header, truncation and CRC are built by hand.
+    pub fn global_position_int_from_json(json: &[u8]) -> Packet {
+        let mut system_id = 0u8;
+        let mut component_id = 0u8;
+        let mut sequence = 0u8;
+        // time_boot_ms, lat, lon, alt, relative_alt, vx, vy, vz, hdg
+        let mut fields = [0i64; 9];
+
+        let n = json.len();
+        let mut i = 0;
+        while i < n {
+            if json[i] != b'"' {
+                i += 1;
+                continue;
+            }
+
+            // Read a quoted token.
+            let key_start = i + 1;
+            let mut j = key_start;
+            while j < n && json[j] != b'"' {
+                j += 1;
+            }
+            let key = &json[key_start..j];
+            i = j + 1;
+
+            // A key is a quoted token followed by ':'. Otherwise it was a string value.
+            while i < n && json[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= n || json[i] != b':' {
+                continue;
+            }
+            i += 1;
+            while i < n && json[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= n {
+                break;
+            }
+
+            match json[i] {
+                b'"' => {
+                    // String value (e.g. the "type" tag): skip it.
+                    i += 1;
+                    while i < n && json[i] != b'"' {
+                        i += 1;
+                    }
+                    i += 1;
+                }
+                b'{' | b'[' => {
+                    // Descend into the nested object/array to find inner keys.
+                    i += 1;
+                }
+                _ => {
+                    let num_start = i;
+                    while i < n && matches!(json[i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
+                    {
+                        i += 1;
+                    }
+                    let value = parse_i64(&json[num_start..i]);
+                    match key {
+                        b"system_id" => system_id = value as u8,
+                        b"component_id" => component_id = value as u8,
+                        b"sequence" => sequence = value as u8,
+                        b"time_boot_ms" => fields[0] = value,
+                        b"lat" => fields[1] = value,
+                        b"lon" => fields[2] = value,
+                        b"alt" => fields[3] = value,
+                        b"relative_alt" => fields[4] = value,
+                        b"vx" => fields[5] = value,
+                        b"vy" => fields[6] = value,
+                        b"vz" => fields[7] = value,
+                        b"hdg" => fields[8] = value,
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let mut payload = [0u8; GLOBAL_POSITION_INT_PAYLOAD_LEN];
+        payload[0..4].copy_from_slice(&(fields[0] as u32).to_le_bytes());
+        payload[4..8].copy_from_slice(&(fields[1] as i32).to_le_bytes());
+        payload[8..12].copy_from_slice(&(fields[2] as i32).to_le_bytes());
+        payload[12..16].copy_from_slice(&(fields[3] as i32).to_le_bytes());
+        payload[16..20].copy_from_slice(&(fields[4] as i32).to_le_bytes());
+        payload[20..22].copy_from_slice(&(fields[5] as i16).to_le_bytes());
+        payload[22..24].copy_from_slice(&(fields[6] as i16).to_le_bytes());
+        payload[24..26].copy_from_slice(&(fields[7] as i16).to_le_bytes());
+        payload[26..28].copy_from_slice(&(fields[8] as u16).to_le_bytes());
+
+        build_v2_frame(
+            GLOBAL_POSITION_INT_ID,
+            system_id,
+            component_id,
+            sequence,
+            &payload,
+        )
+    }
+
+    /// Builds a MAVLink v2 frame (STX, header, truncated payload, CRC) byte-identical to
+    /// rust-mavlink's `serialize_message`.
+    fn build_v2_frame(
+        msgid: u32,
+        system_id: u8,
+        component_id: u8,
+        sequence: u8,
+        payload: &[u8],
+    ) -> Packet {
+        // v2 trims trailing zero bytes of the payload.
+        let mut len = payload.len();
+        while len > 0 && payload[len - 1] == 0 {
+            len -= 1;
+        }
+
+        let msgid_bytes = msgid.to_le_bytes();
+        let mut frame =
+            Vec::with_capacity(1 + V2Packet::HEADER_SIZE + len + V2Packet::CHECKSUM_SIZE);
+        frame.push(crate::v2::V2_STX);
+        frame.push(len as u8);
+        frame.push(0); // incompat flags
+        frame.push(0); // compat flags
+        frame.push(sequence);
+        frame.push(system_id);
+        frame.push(component_id);
+        frame.extend_from_slice(&msgid_bytes[0..3]);
+        frame.extend_from_slice(&payload[..len]);
+
+        let extra_crc = crate::codec::get_extra_crc(msgid).unwrap_or(0);
+        let crc = mavlink::calculate_crc(&frame[1..], extra_crc);
+        frame.extend_from_slice(&crc.to_le_bytes());
+
+        Packet::V2(V2Packet::new(Bytes::from(frame)))
+    }
+
+    #[inline(always)]
+    fn parse_i64(s: &[u8]) -> i64 {
+        let (neg, digits) = match s.first() {
+            Some(b'-') => (true, &s[1..]),
+            _ => (false, s),
+        };
+        let mut value = 0i64;
+        for &b in digits {
+            if b.is_ascii_digit() {
+                value = value * 10 + (b - b'0') as i64;
+            } else {
+                break;
+            }
+        }
+        if neg {
+            -value
+        } else {
+            value
+        }
+    }
 
     /// Transcodes a `GLOBAL_POSITION_INT` frame straight to JSON, appended to `out`.
     ///

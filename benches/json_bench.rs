@@ -161,6 +161,50 @@ fn benchmark_json_to_packet(c: &mut Criterion) {
     group.finish();
 }
 
+/// Reverse Option C spike: hand-written JSON -> wire transcoder vs. the serde baseline, on a
+/// stream of GLOBAL_POSITION_INT JSON strings.
+fn benchmark_spike_from_json(c: &mut Criterion) {
+    let seed = 42;
+    println!("Using seed {seed:?}");
+    let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+
+    let mut group = c.benchmark_group("json_to_packet_spike/global_position_int");
+    group.confidence_level(0.95).sample_size(100);
+    group.throughput(Throughput::Elements(1000));
+
+    let mut jsons = Vec::with_capacity(1000);
+    for _ in 0..1000 {
+        let raw = create_random_v2_message_from_id(&mut rng, experimental::GLOBAL_POSITION_INT_ID)
+            .unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+        jsons
+            .push(serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap());
+    }
+
+    // Baseline: serde_json::from_str + to_packet.
+    group.bench_function("from_str+to_packet", |b| {
+        b.iter(|| {
+            for json in &jsons {
+                let mavlink_json: MAVLinkJSON<MavMessage> = serde_json::from_str(json).unwrap();
+                let packet = mavlink_json.to_packet(MavlinkVersion::V2);
+                black_box(packet);
+            }
+        })
+    });
+
+    // Option C spike: JSON text -> wire directly.
+    group.bench_function("spike-transcode", |b| {
+        b.iter(|| {
+            for json in &jsons {
+                let packet = experimental::global_position_int_from_json(json.as_bytes());
+                black_box(packet);
+            }
+        })
+    });
+
+    group.finish();
+}
+
 /// Option C spike: hand-written per-message transcoders vs. the Option A serde path, one
 /// benchmark group per representative message type (covering ints, floats, arrays, enums,
 /// bitflags), on a homogeneous stream of 1000 frames.
@@ -239,6 +283,7 @@ criterion_group!(
     benches,
     benchmark_packet_to_json,
     benchmark_json_to_packet,
-    benchmark_spike
+    benchmark_spike,
+    benchmark_spike_from_json
 );
 criterion_main!(benches);

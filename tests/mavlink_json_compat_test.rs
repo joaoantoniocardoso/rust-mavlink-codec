@@ -227,6 +227,34 @@ fn spike_heartbeat_matches_baseline() {
     }
 }
 
+/// Reverse Option C spike: the hand-written JSON -> wire transcoder must produce byte-identical
+/// frames to the serde baseline, and must tolerate reordered fields and extra whitespace.
+#[test]
+fn spike_global_position_int_from_json_matches_baseline() {
+    use mavlink_codec::mavlink_json::experimental;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(555);
+
+    for _ in 0..5000 {
+        let raw = dev_utils::create_random_v2_message_from_id(
+            &mut rng,
+            experimental::GLOBAL_POSITION_INT_ID,
+        )
+        .unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+
+        let json = serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+
+        let spike = experimental::global_position_int_from_json(json.as_bytes());
+        assert_eq!(spike.as_slice(), packet.as_slice());
+
+        // Whitespace tolerance: the scanner must still reproduce the same frame.
+        let spaced = json.replace(':', " : ").replace(',', " , ");
+        let spike_spaced = experimental::global_position_int_from_json(spaced.as_bytes());
+        assert_eq!(spike_spaced.as_slice(), packet.as_slice());
+    }
+}
+
 fn build_packet(message: &MavMessage) -> Packet {
     let header = mavlink::MavHeader {
         system_id: 42,
