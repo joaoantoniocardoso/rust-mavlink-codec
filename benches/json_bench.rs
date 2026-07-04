@@ -11,11 +11,7 @@ use criterion::{
 };
 use dev_utils::{create_random_v2_message_from_id, create_random_v2_raw_message};
 use mavlink::{dialects::ardupilotmega::MavMessage, MavlinkVersion};
-use mavlink_codec::{
-    mavlink_json::{experimental, MAVLinkJSON},
-    v2::V2Packet,
-    Packet,
-};
+use mavlink_codec::{mavlink_json::MAVLinkJSON, v2::V2Packet, Packet};
 use rand::{prelude::StdRng, SeedableRng};
 
 fn benchmark_packet_to_json(c: &mut Criterion) {
@@ -161,31 +157,19 @@ fn benchmark_json_to_packet(c: &mut Criterion) {
     group.finish();
 }
 
-/// Reverse Option C spike: hand-written JSON -> wire transcoders vs. the serde baseline, across
+/// Reverse path: descriptor-driven JSON -> wire transcoder vs. the serde baseline, across
 /// integer, float and enum/bitflag messages.
-fn benchmark_spike_from_json(c: &mut Criterion) {
+fn benchmark_from_json(c: &mut Criterion) {
     let seed = 42;
     println!("Using seed {seed:?}");
 
-    let cases: &[(&str, u32, fn(&[u8]) -> Packet)] = &[
-        (
-            "global_position_int",
-            experimental::GLOBAL_POSITION_INT_ID,
-            experimental::global_position_int_from_json,
-        ),
-        (
-            "attitude",
-            experimental::ATTITUDE_ID,
-            experimental::attitude_from_json,
-        ),
-        (
-            "heartbeat",
-            experimental::HEARTBEAT_ID,
-            experimental::heartbeat_from_json,
-        ),
+    let cases: &[(&str, u32)] = &[
+        ("global_position_int", 33),
+        ("attitude", 30),
+        ("heartbeat", 0),
     ];
 
-    for (name, msg_id, transcode) in cases {
+    for (name, msg_id) in cases {
         let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
 
         let mut jsons = Vec::with_capacity(1000);
@@ -201,7 +185,7 @@ fn benchmark_spike_from_json(c: &mut Criterion) {
             jsons.push(json);
         }
 
-        let mut group = c.benchmark_group(format!("json_to_packet_spike/{name}"));
+        let mut group = c.benchmark_group(format!("json_to_packet/{name}"));
         group.confidence_level(0.95).sample_size(100);
         group.throughput(Throughput::Elements(1000));
 
@@ -210,15 +194,6 @@ fn benchmark_spike_from_json(c: &mut Criterion) {
                 for json in &jsons {
                     let mavlink_json: MAVLinkJSON<MavMessage> = serde_json::from_str(json).unwrap();
                     let packet = mavlink_json.to_packet(MavlinkVersion::V2);
-                    black_box(packet);
-                }
-            })
-        });
-
-        group.bench_function("spike-transcode", |b| {
-            b.iter(|| {
-                for json in &jsons {
-                    let packet = transcode(json.as_bytes());
                     black_box(packet);
                 }
             })
@@ -238,42 +213,25 @@ fn benchmark_spike_from_json(c: &mut Criterion) {
     }
 }
 
-/// Option C spike: hand-written per-message transcoders vs. the Option A serde path, one
+/// Forward path: descriptor-driven wire -> JSON transcoder vs. the Option A serde path, one
 /// benchmark group per representative message type (covering ints, floats, arrays, enums,
 /// bitflags), on a homogeneous stream of 1000 frames.
-fn benchmark_spike(c: &mut Criterion) {
+fn benchmark_to_json_per_message(c: &mut Criterion) {
     let seed = 42;
     println!("Using seed {seed:?}");
     let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
 
-    type Transcoder = fn(&Packet, &mut Vec<u8>);
-    let cases: [(&str, u32, Transcoder); 4] = [
-        (
-            "global_position_int",
-            experimental::GLOBAL_POSITION_INT_ID,
-            experimental::global_position_int_to_json,
-        ),
-        (
-            "attitude",
-            experimental::ATTITUDE_ID,
-            experimental::attitude_to_json,
-        ),
-        (
-            "gps_status",
-            experimental::GPS_STATUS_ID,
-            experimental::gps_status_to_json,
-        ),
-        (
-            "heartbeat",
-            experimental::HEARTBEAT_ID,
-            experimental::heartbeat_to_json,
-        ),
+    let cases: [(&str, u32); 4] = [
+        ("global_position_int", 33),
+        ("attitude", 30),
+        ("gps_status", 25),
+        ("heartbeat", 0),
     ];
 
     let messages_count = 1000usize;
 
-    for (label, msgid, transcode) in cases {
-        let mut group = c.benchmark_group(format!("packet_to_json_spike/{label}"));
+    for (label, msgid) in cases {
+        let mut group = c.benchmark_group(format!("packet_to_json/{label}"));
         group.confidence_level(0.95).sample_size(100);
         group.throughput(Throughput::Elements(messages_count as u64));
 
@@ -291,18 +249,6 @@ fn benchmark_spike(c: &mut Criterion) {
                     let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
                     buf.clear();
                     mavlink_json.write_json(&mut buf).unwrap();
-                    black_box(&buf);
-                }
-            })
-        });
-
-        // Option C spike: hand-written wire bytes -> JSON directly, into a reused buffer.
-        group.bench_function("spike-transcode", |b| {
-            let mut buf: Vec<u8> = Vec::with_capacity(4096);
-            b.iter(|| {
-                for packet in &packets {
-                    buf.clear();
-                    transcode(packet, &mut buf);
                     black_box(&buf);
                 }
             })
@@ -328,7 +274,7 @@ criterion_group!(
     benches,
     benchmark_packet_to_json,
     benchmark_json_to_packet,
-    benchmark_spike,
-    benchmark_spike_from_json
+    benchmark_to_json_per_message,
+    benchmark_from_json
 );
 criterion_main!(benches);

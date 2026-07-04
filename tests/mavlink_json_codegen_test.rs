@@ -2,8 +2,8 @@
 //!
 //! For every covered message id, `Packet::write_json_transcoded` (descriptor table + generic
 //! interpreter) must be byte-identical to the `rust-mavlink` + `serde_json` baseline across many
-//! random valid messages. This is the correctness oracle that lets the generated tables replace
-//! the hand-written `experimental` spikes and scale to the whole dialect.
+//! random valid messages. This is the correctness oracle for the generated descriptor tables as
+//! they scale to the whole dialect.
 
 use mavlink::dialects::ardupilotmega::MavMessage;
 use mavlink_codec::{v2::V2Packet, Packet};

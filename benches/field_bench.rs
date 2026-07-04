@@ -19,7 +19,11 @@ use bytes::Bytes;
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use dev_utils::create_random_v2_message_from_id;
 use mavlink::dialects::ardupilotmega::MavMessage;
-use mavlink_codec::{mavlink_json::experimental, v2::V2Packet, Packet};
+use mavlink_codec::{
+    mavlink_json::{generated, rt},
+    v2::V2Packet,
+    Packet,
+};
 use rand::{prelude::StdRng, SeedableRng};
 
 const N: usize = 1000;
@@ -31,10 +35,10 @@ fn benchmark_per_field_egress(c: &mut Criterion) {
 
     let mut packets = Vec::with_capacity(N);
     for _ in 0..N {
-        let raw = create_random_v2_message_from_id(&mut rng, experimental::GLOBAL_POSITION_INT_ID)
-            .unwrap();
+        let raw = create_random_v2_message_from_id(&mut rng, 33).unwrap();
         packets.push(Packet::V2(V2Packet::from(raw)));
     }
+    let desc = generated::descriptor(33).unwrap();
 
     let mut group = c.benchmark_group("per_field_egress/global_position_int");
     group.confidence_level(0.95).sample_size(100);
@@ -71,7 +75,7 @@ fn benchmark_per_field_egress(c: &mut Criterion) {
         b.iter(|| {
             for packet in &packets {
                 full.clear();
-                experimental::global_position_int_to_json(packet, &mut full);
+                packet.write_json_transcoded(&mut full);
                 black_box(Bytes::copy_from_slice(&full));
 
                 // v2 truncates trailing zero bytes; zero-pad so fixed-offset reads are valid.
@@ -96,17 +100,14 @@ fn benchmark_per_field_egress(c: &mut Criterion) {
             for packet in &packets {
                 out.clear();
                 let mut ranges = [(0u32, 0u32); 9];
-                experimental::global_position_int_to_json_indexed(packet, &mut out, &mut ranges);
+                rt::to_json_indexed(packet, desc, &mut out, &mut ranges);
                 let blob = Bytes::copy_from_slice(&out);
                 black_box(&blob);
 
-                for (i, name) in experimental::GLOBAL_POSITION_INT_FIELD_NAMES
-                    .iter()
-                    .enumerate()
-                {
+                for (i, field) in desc.fields.iter().enumerate() {
                     let (start, end) = ranges[i];
-                    let field = blob.slice(start as usize..end as usize);
-                    black_box((name, field));
+                    let slice = blob.slice(start as usize..end as usize);
+                    black_box((field.name, slice));
                 }
             }
         })
@@ -121,9 +122,10 @@ fn benchmark_per_field_egress_gps_status(c: &mut Criterion) {
 
     let mut packets = Vec::with_capacity(N);
     for _ in 0..N {
-        let raw = create_random_v2_message_from_id(&mut rng, experimental::GPS_STATUS_ID).unwrap();
+        let raw = create_random_v2_message_from_id(&mut rng, 25).unwrap();
         packets.push(Packet::V2(V2Packet::from(raw)));
     }
+    let desc = generated::descriptor(25).unwrap();
 
     let mut group = c.benchmark_group("per_field_egress/gps_status");
     group.confidence_level(0.95).sample_size(100);
@@ -156,7 +158,7 @@ fn benchmark_per_field_egress_gps_status(c: &mut Criterion) {
         b.iter(|| {
             for packet in &packets {
                 full.clear();
-                experimental::gps_status_to_json(packet, &mut full);
+                packet.write_json_transcoded(&mut full);
                 black_box(Bytes::copy_from_slice(&full));
 
                 let mut payload = [0u8; 101];
@@ -180,14 +182,14 @@ fn benchmark_per_field_egress_gps_status(c: &mut Criterion) {
             for packet in &packets {
                 out.clear();
                 let mut ranges = [(0u32, 0u32); 6];
-                experimental::gps_status_to_json_indexed(packet, &mut out, &mut ranges);
+                rt::to_json_indexed(packet, desc, &mut out, &mut ranges);
                 let blob = Bytes::copy_from_slice(&out);
                 black_box(&blob);
 
-                for (i, name) in experimental::GPS_STATUS_FIELD_NAMES.iter().enumerate() {
+                for (i, field) in desc.fields.iter().enumerate() {
                     let (start, end) = ranges[i];
-                    let field = blob.slice(start as usize..end as usize);
-                    black_box((name, field));
+                    let slice = blob.slice(start as usize..end as usize);
+                    black_box((field.name, slice));
                 }
             }
         })
