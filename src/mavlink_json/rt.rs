@@ -7,7 +7,9 @@
 //! data generated) keeps the generated code tiny and lets the whole dialect share one hot loop.
 
 use bytes::Bytes;
+use mavlink::MavlinkVersion;
 
+use crate::v1::{V1Packet, V1_STX};
 use crate::v2::{V2Packet, V2_STX};
 use crate::Packet;
 
@@ -18,7 +20,11 @@ use crate::Packet;
 pub struct MsgDesc {
     pub id: u32,
     pub name: &'static str,
+    /// Full payload length including MAVLink v2 extension fields (used for v2 framing).
     pub payload_len: u16,
+    /// Payload length of the base (non-extension) fields only, which is exactly what a MAVLink v1
+    /// frame carries (v1 has no extensions and no trailing-zero truncation).
+    pub base_len: u16,
     /// MAVLink `CRC_EXTRA` seed byte, baked at build time (rust-mavlink's `extra_crc`).
     pub crc_extra: u8,
     pub fields: &'static [FieldDesc],
@@ -390,13 +396,17 @@ fn hex_digit(nibble: u8) -> u8 {
     }
 }
 
-/// Transcodes MAVLinkJSON text straight to a wire v2 [`Packet`], resolving the message descriptor
-/// from the `"type"` tag via `resolve`. Returns `None` if the type is unknown or the JSON is
-/// malformed.
+/// Transcodes MAVLinkJSON text straight to a wire [`Packet`] of the requested `version`, resolving
+/// the message descriptor from the `"type"` tag via `resolve`. Returns `None` if the type is
+/// unknown or the JSON is malformed.
 ///
 /// Produces the exact same frame as `serde_json::from_str::<MAVLinkJSON<_>>` followed by
-/// `to_packet(MavlinkVersion::V2)`, tolerating reordered members and extra whitespace.
-pub fn from_json_v2(json: &[u8], resolve: fn(&[u8]) -> Option<&'static MsgDesc>) -> Option<Packet> {
+/// `to_packet(version)`, tolerating reordered members and extra whitespace.
+pub fn from_json(
+    json: &[u8],
+    resolve: fn(&[u8]) -> Option<&'static MsgDesc>,
+    version: MavlinkVersion,
+) -> Option<Packet> {
     let mut p = Parser { b: json, i: 0 };
     let mut sys = 0u8;
     let mut comp = 0u8;
@@ -427,12 +437,13 @@ pub fn from_json_v2(json: &[u8], resolve: fn(&[u8]) -> Option<&'static MsgDesc>)
     }
 
     let desc = desc?;
-    Some(build_v2_frame(
+    Some(build_frame(
         desc,
         sys,
         comp,
         seq,
         &payload[..desc.payload_len as usize],
+        version,
     ))
 }
 
@@ -671,31 +682,65 @@ fn parse_hex_u64(s: &[u8]) -> u64 {
     v
 }
 
-/// Builds a MAVLink v2 frame (STX, header, trailing-zero-trimmed payload, CRC), byte-identical to
-/// rust-mavlink's `serialize_message`.
-fn build_v2_frame(desc: &MsgDesc, sys: u8, comp: u8, seq: u8, payload: &[u8]) -> Packet {
-    // MAVLink v2 keeps at least one payload byte (see mavlink-core `remove_trailing_zeroes`).
-    let mut len = payload.len();
-    while len > 1 && payload[len - 1] == 0 {
-        len -= 1;
+/// Builds a wire frame of the requested `version`, byte-identical to rust-mavlink's
+/// `serialize_message` for that version.
+///
+/// * v2 carries the full payload (base + extension fields) with trailing zeros trimmed to at least
+///   one byte, and a 3-byte message id.
+/// * v1 carries only the base fields (`base_len` bytes, never truncated), a 1-byte message id, and
+///   cannot represent extension fields or ids above 255 (the id is truncated, matching mavlink).
+fn build_frame(
+    desc: &MsgDesc,
+    sys: u8,
+    comp: u8,
+    seq: u8,
+    payload: &[u8],
+    version: MavlinkVersion,
+) -> Packet {
+    match version {
+        MavlinkVersion::V2 => {
+            // MAVLink v2 keeps at least one payload byte (see mavlink-core `remove_trailing_zeroes`).
+            let mut len = payload.len();
+            while len > 1 && payload[len - 1] == 0 {
+                len -= 1;
+            }
+
+            let msgid = desc.id.to_le_bytes();
+            let mut frame =
+                Vec::with_capacity(1 + V2Packet::HEADER_SIZE + len + V2Packet::CHECKSUM_SIZE);
+            frame.push(V2_STX);
+            frame.push(len as u8);
+            frame.push(0); // incompat flags
+            frame.push(0); // compat flags
+            frame.push(seq);
+            frame.push(sys);
+            frame.push(comp);
+            frame.extend_from_slice(&msgid[0..3]);
+            frame.extend_from_slice(&payload[..len]);
+
+            let crc = mavlink::calculate_crc(&frame[1..], desc.crc_extra);
+            frame.extend_from_slice(&crc.to_le_bytes());
+
+            Packet::V2(V2Packet::new(Bytes::from(frame)))
+        }
+        MavlinkVersion::V1 => {
+            let len = (desc.base_len as usize).min(payload.len());
+            let mut frame =
+                Vec::with_capacity(1 + V1Packet::HEADER_SIZE + len + V1Packet::CHECKSUM_SIZE);
+            frame.push(V1_STX);
+            frame.push(len as u8);
+            frame.push(seq);
+            frame.push(sys);
+            frame.push(comp);
+            frame.push(desc.id as u8);
+            frame.extend_from_slice(&payload[..len]);
+
+            let crc = mavlink::calculate_crc(&frame[1..], desc.crc_extra);
+            frame.extend_from_slice(&crc.to_le_bytes());
+
+            Packet::V1(V1Packet::new(Bytes::from(frame)))
+        }
     }
-
-    let msgid = desc.id.to_le_bytes();
-    let mut frame = Vec::with_capacity(1 + V2Packet::HEADER_SIZE + len + V2Packet::CHECKSUM_SIZE);
-    frame.push(V2_STX);
-    frame.push(len as u8);
-    frame.push(0); // incompat flags
-    frame.push(0); // compat flags
-    frame.push(seq);
-    frame.push(sys);
-    frame.push(comp);
-    frame.extend_from_slice(&msgid[0..3]);
-    frame.extend_from_slice(&payload[..len]);
-
-    let crc = mavlink::calculate_crc(&frame[1..], desc.crc_extra);
-    frame.extend_from_slice(&crc.to_le_bytes());
-
-    Packet::V2(V2Packet::new(Bytes::from(frame)))
 }
 
 #[inline(always)]

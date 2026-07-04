@@ -57,6 +57,25 @@ fn from_json_materializes_wire_lazily() {
 }
 
 #[test]
+fn system_and_component_id_resolve_from_either_side() {
+    let packet = sample_packet(0xC0FFEE, GLOBAL_POSITION_INT);
+    let sys = *packet.system_id();
+    let comp = *packet.component_id();
+
+    // Wire-sourced: read straight from the frame header, no JSON needed.
+    let from_wire = MAVLinkMessage::from_packet(packet.clone());
+    assert_eq!(from_wire.system_id(), Some(sys));
+    assert_eq!(from_wire.component_id(), Some(comp));
+    assert!(!from_wire.has_json());
+
+    // JSON-sourced: read from the JSON header without materializing the wire frame.
+    let from_json = MAVLinkMessage::from_json(transcoded_json(&packet));
+    assert_eq!(from_json.system_id(), Some(sys));
+    assert_eq!(from_json.component_id(), Some(comp));
+    assert!(!from_json.has_wire());
+}
+
+#[test]
 fn unknown_wire_id_passes_binary_but_has_no_json() {
     // An id not present in the compiled dialect (a message a newer sender knows, we don't).
     let unknown_id = 0x00FF_FFFEu32;

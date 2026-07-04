@@ -270,11 +270,82 @@ fn benchmark_to_json_per_message(c: &mut Criterion) {
     }
 }
 
+/// Whole-dialect aggregate: one random frame of every covered message id, benchmarking the
+/// generated transcoders against the serde baseline over the full heterogeneous stream (the
+/// realistic mixed-traffic router workload). Reports throughput in messages/s.
+fn benchmark_full_dialect(c: &mut Criterion) {
+    let seed = 42;
+    println!("Using seed {seed:?}");
+    let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
+
+    let ids = dev_utils::all_message_ids();
+    let mut packets = Vec::with_capacity(ids.len());
+    let mut jsons = Vec::with_capacity(ids.len());
+    for &(_name, id) in ids {
+        let raw = create_random_v2_message_from_id(&mut rng, id).unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+        let json = serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+        // Keep both directions comparable to serde, which cannot deserialize `null` floats.
+        if !json.contains("null") {
+            jsons.push(json);
+        }
+        packets.push(packet);
+    }
+
+    let mut group = c.benchmark_group("full_dialect");
+    group.confidence_level(0.95).sample_size(50);
+
+    group.throughput(Throughput::Elements(packets.len() as u64));
+    group.bench_function("forward/write_json-reused-buf", |b| {
+        let mut buf: Vec<u8> = Vec::with_capacity(4096);
+        b.iter(|| {
+            for packet in &packets {
+                let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                buf.clear();
+                mavlink_json.write_json(&mut buf).unwrap();
+                black_box(&buf);
+            }
+        })
+    });
+    group.bench_function("forward/generated-transcode", |b| {
+        let mut buf: Vec<u8> = Vec::with_capacity(4096);
+        b.iter(|| {
+            for packet in &packets {
+                buf.clear();
+                packet.write_json_transcoded(&mut buf);
+                black_box(&buf);
+            }
+        })
+    });
+
+    group.throughput(Throughput::Elements(jsons.len() as u64));
+    group.bench_function("reverse/from_str+to_packet", |b| {
+        b.iter(|| {
+            for json in &jsons {
+                let mavlink_json: MAVLinkJSON<MavMessage> = serde_json::from_str(json).unwrap();
+                let packet = mavlink_json.to_packet(MavlinkVersion::V2);
+                black_box(packet);
+            }
+        })
+    });
+    group.bench_function("reverse/generated-transcode", |b| {
+        b.iter(|| {
+            for json in &jsons {
+                let packet = Packet::from_json_transcoded(json.as_bytes());
+                black_box(packet);
+            }
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     benchmark_packet_to_json,
     benchmark_json_to_packet,
     benchmark_to_json_per_message,
-    benchmark_from_json
+    benchmark_from_json,
+    benchmark_full_dialect
 );
 criterion_main!(benches);

@@ -80,7 +80,15 @@ impl Packet {
     /// covered by the generator or the JSON is malformed. Produces the exact same frame as
     /// deserializing into [`MAVLinkJSON`] and calling `to_packet(MavlinkVersion::V2)`.
     pub fn from_json_transcoded(json: &[u8]) -> Option<Packet> {
-        rt::from_json_v2(json, generated::descriptor_by_name)
+        rt::from_json(json, generated::descriptor_by_name, MavlinkVersion::V2)
+    }
+
+    /// Like [`Packet::from_json_transcoded`] but builds a frame of the requested `version`.
+    ///
+    /// A v1 frame carries only the base fields (extension fields and message ids above 255 cannot
+    /// be represented), byte-identical to `to_packet(MavlinkVersion::V1)`.
+    pub fn from_json_transcoded_as(json: &[u8], version: MavlinkVersion) -> Option<Packet> {
+        rt::from_json(json, generated::descriptor_by_name, version)
     }
 }
 

@@ -46,6 +46,7 @@ fn emit_module(profile: &MavProfile) -> String {
         let name = &msg.name;
 
         let mut offset: usize = 0;
+        let mut base_len: usize = 0;
         let mut fields = String::new();
         for field in &msg.fields {
             let kind = field_kind(profile, field, &mut enum_tables);
@@ -55,6 +56,11 @@ fn emit_module(profile: &MavProfile) -> String {
                 field.name, offset, kind
             );
             offset += mav_len(&field.mavtype);
+            // Base (non-extension) fields are contiguous at the front; MAVLink v1 frames carry
+            // exactly these and never the extension fields.
+            if !field.is_extension {
+                base_len += mav_len(&field.mavtype);
+            }
         }
 
         let fields_ident = format!("FIELDS_{name}");
@@ -65,8 +71,8 @@ fn emit_module(profile: &MavProfile) -> String {
         );
         let _ = writeln!(
             msgs_code,
-            "static {msg_ident}: MsgDesc = MsgDesc {{ id: {}, name: {:?}, payload_len: {}, crc_extra: {}, fields: {fields_ident} }};",
-            msg.id, msg.name, offset, extra_crc(msg)
+            "static {msg_ident}: MsgDesc = MsgDesc {{ id: {}, name: {:?}, payload_len: {}, base_len: {}, crc_extra: {}, fields: {fields_ident} }};",
+            msg.id, msg.name, offset, base_len, extra_crc(msg)
         );
         let _ = writeln!(dispatch, "        {} => Some(&{msg_ident}),", msg.id);
         let _ = writeln!(

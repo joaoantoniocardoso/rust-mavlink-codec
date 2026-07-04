@@ -88,6 +88,29 @@ impl MAVLinkMessage {
         generated::descriptor_by_name(name).map(|desc| desc.id)
     }
 
+    /// The originating system id, resolved as cheaply as possible.
+    ///
+    /// Uses the wire header when available; otherwise reads the `"system_id"` member from the JSON
+    /// header without transcoding the frame. Returns [`None`] only if neither side is present or the
+    /// JSON is malformed.
+    pub fn system_id(&self) -> Option<u8> {
+        self.header_u8(b"system_id", |packet| *packet.system_id())
+    }
+
+    /// The originating component id, resolved as cheaply as possible (see [`Self::system_id`]).
+    pub fn component_id(&self) -> Option<u8> {
+        self.header_u8(b"component_id", |packet| *packet.component_id())
+    }
+
+    /// Resolves a `u8` header field from the wire frame if present, else from the JSON header.
+    fn header_u8(&self, key: &[u8], from_wire: fn(&Packet) -> u8) -> Option<u8> {
+        if let Some(Some(packet)) = self.wire.get() {
+            return Some(from_wire(packet));
+        }
+        let json = self.json.get()?.as_ref()?;
+        json_header_number(json, key).map(|value| value as u8)
+    }
+
     /// Whether the wire representation is already materialized (no transcoding on next `wire()`).
     pub fn has_wire(&self) -> bool {
         matches!(self.wire.get(), Some(Some(_)))
@@ -142,6 +165,43 @@ fn json_type_tag(json: &[u8]) -> Option<&[u8]> {
                 j += 1;
             }
             return Some(&json[start..j]);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Returns the unsigned integer value of the first `"<key>":<number>` member. The key is matched
+/// quoted so it never collides with a message field of the same name (the header, which carries
+/// `system_id`/`component_id`, is always serialized before the `"message"` object). Reads only up
+/// to the value, avoiding a full parse.
+fn json_header_number(json: &[u8], key: &[u8]) -> Option<u64> {
+    let mut i = 0;
+    while i < json.len() {
+        // Match the exact token `"<key>":`, requiring the surrounding quotes and colon.
+        if json[i] == b'"'
+            && json[i + 1..].starts_with(key)
+            && json.get(i + 1 + key.len()) == Some(&b'"')
+        {
+            let mut j = i + 1 + key.len() + 1;
+            while json.get(j)?.is_ascii_whitespace() {
+                j += 1;
+            }
+            if *json.get(j)? != b':' {
+                return None;
+            }
+            j += 1;
+            while json.get(j)?.is_ascii_whitespace() {
+                j += 1;
+            }
+            let mut value: u64 = 0;
+            let mut any = false;
+            while let Some(d @ b'0'..=b'9') = json.get(j) {
+                value = value * 10 + u64::from(d - b'0');
+                any = true;
+                j += 1;
+            }
+            return any.then_some(value);
         }
         i += 1;
     }

@@ -167,6 +167,79 @@ fn generated_from_json_matches_serde_baseline() {
     );
 }
 
+/// Reverse direction, MAVLink v1: `from_json_transcoded_as(_, V1)` must be byte-identical to
+/// `serde from_str` + `to_packet(V1)`. v1 carries only base fields and cannot represent ids > 255.
+#[test]
+fn generated_from_json_v1_matches_serde_baseline() {
+    use mavlink::MavlinkVersion;
+    use mavlink_codec::mavlink_json::MAVLinkJSON;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(0x1122_3344);
+    let mut total_tested = 0u64;
+
+    for &(name, id) in dev_utils::all_message_ids() {
+        if id > 255 {
+            continue; // v1 message ids are a single byte
+        }
+        let mut tested = 0;
+        for _ in 0..200 {
+            let raw = dev_utils::create_random_v2_message_from_id(&mut rng, id).unwrap();
+            let packet = Packet::V2(V2Packet::from(raw));
+            let json =
+                serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+            if json.contains("null") {
+                continue;
+            }
+
+            let baseline: MAVLinkJSON<MavMessage> = serde_json::from_str(&json).unwrap();
+            let baseline_v1 = baseline.to_packet(MavlinkVersion::V1);
+            let transcoded_v1 =
+                Packet::from_json_transcoded_as(json.as_bytes(), MavlinkVersion::V1).unwrap();
+            assert_eq!(
+                transcoded_v1.as_slice(),
+                baseline_v1.as_slice(),
+                "v1 reverse transcoder diverged for id {id} ({name}): {json}"
+            );
+            tested += 1;
+        }
+        assert!(tested > 0, "no non-null samples for id {id} ({name})");
+        total_tested += tested;
+    }
+    assert!(total_tested > 5_000, "too few v1 samples: {total_tested}");
+}
+
+/// Signed MAVLink v2 frames (incompat flag `0x01` + trailing 13-byte signature) must transcode
+/// forward exactly like the unsigned frame: `V2Packet::payload` excludes the signature, so both
+/// serde and the transcoder read the same payload and the signature never appears in the JSON.
+#[test]
+fn signed_v2_frames_transcode_forward_like_serde() {
+    let mut rng: StdRng = SeedableRng::seed_from_u64(0x5169_11ED);
+    let mut out: Vec<u8> = Vec::new();
+
+    for &(name, id) in dev_utils::all_message_ids() {
+        for _ in 0..40 {
+            let raw = dev_utils::create_random_v2_message_from_id(&mut rng, id).unwrap();
+            let unsigned = Packet::V2(V2Packet::from(raw));
+
+            // Re-frame as signed: set the incompat-flags byte and append a dummy signature block.
+            let mut bytes = unsigned.as_slice().to_vec();
+            bytes[2] = 0x01; // MAVLINK_IFLAG_SIGNED
+            bytes.extend_from_slice(&[0xAB; 13]); // link id + timestamp + signature
+            let signed = Packet::V2(V2Packet::new(bytes::Bytes::from(bytes)));
+
+            let baseline =
+                serde_json::to_string(&signed.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+            out.clear();
+            assert!(signed.write_json_transcoded(&mut out));
+            assert_eq!(
+                std::str::from_utf8(&out).unwrap(),
+                baseline,
+                "signed-frame forward transcode diverged for id {id} ({name})"
+            );
+        }
+    }
+}
+
 /// Returns the raw JSON value token that follows `"key":` in `json` (a balanced number, string,
 /// object or array). Keys are searched quoted+colon so shorter keys never match inside longer
 /// ones. Used as an exact per-field oracle without the f32->f64 upcast of `to_value`.
