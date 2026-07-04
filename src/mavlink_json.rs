@@ -562,6 +562,75 @@ pub mod experimental {
         out.extend_from_slice(br#"}}"#);
     }
 
+    /// Field names of `GLOBAL_POSITION_INT`, in wire/serialization order.
+    ///
+    /// Parallel to the range table filled by [`global_position_int_to_json_indexed`], so
+    /// `FIELD_NAMES[i]` names the value at `ranges[i]`.
+    pub static GLOBAL_POSITION_INT_FIELD_NAMES: [&str; 9] = [
+        "time_boot_ms",
+        "lat",
+        "lon",
+        "alt",
+        "relative_alt",
+        "vx",
+        "vy",
+        "vz",
+        "hdg",
+    ];
+
+    /// Range-indexed variant of [`global_position_int_to_json`]: writes the full MAVLinkJSON to
+    /// `out` and records the byte range of each field's *value* into `ranges`.
+    ///
+    /// A single pass yields both the whole-message JSON (for the aggregate/per-message topics)
+    /// and a per-field index. Once `out` is frozen into a [`Bytes`], each field is published as a
+    /// zero-copy `bytes.slice(ranges[i].0..ranges[i].1)` — no `to_value`, no per-field
+    /// serialization, no allocation. This is the answer to the Zenoh per-field publish cost.
+    pub fn global_position_int_to_json_indexed(
+        packet: &Packet,
+        out: &mut Vec<u8>,
+        ranges: &mut [(u32, u32); 9],
+    ) {
+        let mut p = [0u8; GLOBAL_POSITION_INT_PAYLOAD_LEN];
+        let payload = packet.payload();
+        let n = payload.len().min(GLOBAL_POSITION_INT_PAYLOAD_LEN);
+        p[..n].copy_from_slice(&payload[..n]);
+
+        let time_boot_ms = u32::from_le_bytes([p[0], p[1], p[2], p[3]]);
+        let lat = i32::from_le_bytes([p[4], p[5], p[6], p[7]]);
+        let lon = i32::from_le_bytes([p[8], p[9], p[10], p[11]]);
+        let alt = i32::from_le_bytes([p[12], p[13], p[14], p[15]]);
+        let relative_alt = i32::from_le_bytes([p[16], p[17], p[18], p[19]]);
+        let vx = i16::from_le_bytes([p[20], p[21]]);
+        let vy = i16::from_le_bytes([p[22], p[23]]);
+        let vz = i16::from_le_bytes([p[24], p[25]]);
+        let hdg = u16::from_le_bytes([p[26], p[27]]);
+
+        macro_rules! put_field {
+            ($idx:expr, $sep:expr, $value:expr) => {{
+                out.extend_from_slice($sep);
+                let start = out.len() as u32;
+                put_int(out, $value);
+                ranges[$idx] = (start, out.len() as u32);
+            }};
+        }
+
+        put_header(packet, out);
+        put_field!(
+            0,
+            br#","message":{"type":"GLOBAL_POSITION_INT","time_boot_ms":"#,
+            time_boot_ms
+        );
+        put_field!(1, br#","lat":"#, lat);
+        put_field!(2, br#","lon":"#, lon);
+        put_field!(3, br#","alt":"#, alt);
+        put_field!(4, br#","relative_alt":"#, relative_alt);
+        put_field!(5, br#","vx":"#, vx);
+        put_field!(6, br#","vy":"#, vy);
+        put_field!(7, br#","vz":"#, vz);
+        put_field!(8, br#","hdg":"#, hdg);
+        out.extend_from_slice(br#"}}"#);
+    }
+
     /// MAVLink message id for `ATTITUDE`.
     pub const ATTITUDE_ID: u32 = 30;
     const ATTITUDE_PAYLOAD_LEN: usize = 28;

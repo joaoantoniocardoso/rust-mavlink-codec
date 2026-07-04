@@ -50,6 +50,27 @@ impl V1Packet {
         payload(&self.buffer)
     }
 
+    /// Zero-copy view of the payload as a reference-counted [`Bytes`] slice of the frame buffer.
+    ///
+    /// Unlike [`Self::payload`], the returned slice keeps the underlying frame alive on its own,
+    /// so it can outlive the packet. This is the substrate for a message "view" that borrows
+    /// nothing yet copies nothing.
+    #[inline(always)]
+    pub fn payload_bytes(&self) -> Bytes {
+        let payload_start = V1Packet::STX_SIZE + V1Packet::HEADER_SIZE;
+        let payload_size = *len(&self.buffer) as usize;
+        self.buffer
+            .slice(payload_start..payload_start + payload_size)
+    }
+
+    /// Zero-copy view of the header as a reference-counted [`Bytes`] slice of the frame buffer.
+    #[inline(always)]
+    pub fn header_bytes(&self) -> Bytes {
+        let header_start = V1Packet::STX_SIZE;
+        self.buffer
+            .slice(header_start..header_start + V1Packet::HEADER_SIZE)
+    }
+
     #[inline(always)]
     pub fn checksum(&self) -> u16 {
         checksum(&self.buffer)

@@ -52,6 +52,24 @@ impl Packet {
         }
     }
 
+    /// Zero-copy view of the payload as a reference-counted [`Bytes`] slice of the frame buffer.
+    #[inline(always)]
+    pub fn payload_bytes(&self) -> Bytes {
+        match self {
+            Packet::V1(v1_packet) => v1_packet.payload_bytes(),
+            Packet::V2(v2_packet) => v2_packet.payload_bytes(),
+        }
+    }
+
+    /// Zero-copy view of the header as a reference-counted [`Bytes`] slice of the frame buffer.
+    #[inline(always)]
+    pub fn header_bytes(&self) -> Bytes {
+        match self {
+            Packet::V1(v1_packet) => v1_packet.header_bytes(),
+            Packet::V2(v2_packet) => v2_packet.header_bytes(),
+        }
+    }
+
     #[inline(always)]
     pub fn checksum(&self) -> u16 {
         match self {

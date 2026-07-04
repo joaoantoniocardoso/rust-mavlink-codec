@@ -314,6 +314,48 @@ fn spike_heartbeat_from_json_matches_baseline() {
     }
 }
 
+/// Range-indexed transcoder: the whole-message blob must match serde_json, and every recorded
+/// field value-range must slice out exactly the serde_json encoding of that field.
+#[test]
+fn spike_global_position_int_indexed_matches_baseline() {
+    use mavlink_codec::mavlink_json::experimental;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(1234);
+
+    for _ in 0..5000 {
+        let raw = dev_utils::create_random_v2_message_from_id(
+            &mut rng,
+            experimental::GLOBAL_POSITION_INT_ID,
+        )
+        .unwrap();
+        let packet = Packet::V2(V2Packet::from(raw));
+
+        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+        let expected_full = serde_json::to_string(&mavlink_json).unwrap();
+        let expected_fields = serde_json::to_value(&mavlink_json.message).unwrap();
+
+        let mut out = Vec::new();
+        let mut ranges = [(0u32, 0u32); 9];
+        experimental::global_position_int_to_json_indexed(&packet, &mut out, &mut ranges);
+
+        assert_eq!(out, expected_full.as_bytes());
+
+        for (i, name) in experimental::GLOBAL_POSITION_INT_FIELD_NAMES
+            .iter()
+            .enumerate()
+        {
+            let (start, end) = ranges[i];
+            let field_slice = &out[start as usize..end as usize];
+            let expected_value = serde_json::to_string(&expected_fields[*name]).unwrap();
+            assert_eq!(
+                field_slice,
+                expected_value.as_bytes(),
+                "field {name} mismatch"
+            );
+        }
+    }
+}
+
 fn build_packet(message: &MavMessage) -> Packet {
     let header = mavlink::MavHeader {
         system_id: 42,
