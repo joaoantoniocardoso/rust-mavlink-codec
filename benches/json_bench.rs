@@ -82,6 +82,21 @@ fn benchmark_packet_to_json(c: &mut Criterion) {
             },
         );
 
+        // Reference: parse + serialize to a null sink, to isolate pure format-compute
+        // (itoa/ryu/escaping/serde dispatch) from buffer management.
+        group.bench_with_input(
+            BenchmarkId::new("to_sink", messages_count),
+            messages_count,
+            |b, &_messages_count| {
+                b.iter(|| {
+                    for packet in &packets {
+                        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                        serde_json::to_writer(std::io::sink(), &mavlink_json).unwrap();
+                    }
+                })
+            },
+        );
+
         // Reference: parse only, to expose how much of the cost is the typed parse vs. the
         // JSON serialization (informs whether Option C is worth pursuing).
         group.bench_with_input(
