@@ -128,9 +128,17 @@ fn put_field(p: &[u8], field: &FieldDesc, out: &mut Vec<u8>) {
         FieldKind::Array(sk, len) => put_array(p, off, sk, len as usize, out),
         FieldKind::Enum(table, sk) => {
             let value = read_u64(p, off, sk);
-            out.extend_from_slice(br#"{"type":""#);
-            out.extend_from_slice(enum_name(table, value));
-            out.extend_from_slice(br#""}"#);
+            // A router may be behind the sender: an enum value we don't know yet would make the
+            // typed serde path error and drop the frame. Instead, emit the raw number so the value
+            // propagates (and round-trips through the reverse parser).
+            match enum_name(table, value) {
+                Some(name) => {
+                    out.extend_from_slice(br#"{"type":""#);
+                    out.extend_from_slice(name);
+                    out.extend_from_slice(br#""}"#);
+                }
+                None => put_int(out, value),
+            }
         }
         FieldKind::Bitmask(table, sk) => {
             let bits = read_u64(p, off, sk);
@@ -246,28 +254,58 @@ fn rd_n<const N: usize>(p: &[u8], off: usize) -> [u8; N] {
 }
 
 #[inline(always)]
-fn enum_name(table: &[(u64, &'static str)], value: u64) -> &'static [u8] {
+fn enum_name(table: &[(u64, &'static str)], value: u64) -> Option<&'static [u8]> {
     for (v, name) in table {
         if *v == value {
-            return name.as_bytes();
+            return Some(name.as_bytes());
         }
     }
-    b""
+    None
 }
 
-/// Emits contained flags in declaration order joined by `" | "` (empty when no bits set),
-/// matching the `bitflags` crate's `serde` string representation used by rust-mavlink.
+/// Emits contained flags in declaration order joined by `" | "`, matching `bitflags` v2's `serde`
+/// string representation used by rust-mavlink. Bits not covered by any known flag are preserved as
+/// a trailing lowercase `0x..` hex literal (rust-mavlink reads bitmasks with `from_bits_retain`,
+/// so a newer sender's unknown bits survive both serde and this router). An empty set is `""`.
 fn put_bitmask(table: &[(u64, &'static str)], bits: u64, out: &mut Vec<u8>) {
     let mut first = true;
+    let mut known: u64 = 0;
     for (mask, name) in table {
-        if *mask != 0 && bits & *mask == *mask {
-            if !first {
-                out.extend_from_slice(b" | ");
+        if *mask != 0 {
+            known |= *mask;
+            if bits & *mask == *mask {
+                if !first {
+                    out.extend_from_slice(b" | ");
+                }
+                first = false;
+                out.extend_from_slice(name.as_bytes());
             }
-            first = false;
-            out.extend_from_slice(name.as_bytes());
         }
     }
+    let residual = bits & !known;
+    if residual != 0 {
+        if !first {
+            out.extend_from_slice(b" | ");
+        }
+        out.extend_from_slice(b"0x");
+        put_hex_lower(out, residual);
+    }
+}
+
+/// Writes `value` as lowercase hexadecimal with no leading zeros (matching `bitflags`/`{:x}`).
+fn put_hex_lower(out: &mut Vec<u8>, value: u64) {
+    let mut buf = [0u8; 16];
+    let mut i = buf.len();
+    let mut v = value;
+    loop {
+        i -= 1;
+        buf[i] = hex_digit((v & 0xf) as u8);
+        v >>= 4;
+        if v == 0 {
+            break;
+        }
+    }
+    out.extend_from_slice(&buf[i..]);
 }
 
 #[inline(always)]
@@ -316,8 +354,12 @@ fn put_f64(out: &mut Vec<u8>, value: f64) {
 fn put_char_array(p: &[u8], off: usize, len: usize, out: &mut Vec<u8>) {
     let field = &p[off.min(p.len())..(off + len).min(p.len())];
     let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    // rust-mavlink's `nulstr` errors (dropping the frame) on non-UTF-8 content; a router instead
+    // decodes lossily (U+FFFD for invalid sequences) so the frame still yields valid JSON. Valid
+    // UTF-8 (incl. multibyte) borrows and is emitted byte-for-byte, matching serde_json.
+    let text = String::from_utf8_lossy(&field[..end]);
     out.push(b'"');
-    for &b in &field[..end] {
+    for &b in text.as_bytes() {
         match b {
             b'"' => out.extend_from_slice(b"\\\""),
             b'\\' => out.extend_from_slice(b"\\\\"),
@@ -490,7 +532,13 @@ fn write_field(p: &mut Parser, field: &FieldDesc, payload: &mut [u8]) -> Option<
             }
         }
         FieldKind::Enum(table, sk) => {
-            let value = parse_enum_object(p, table)?;
+            p.skip_ws();
+            let value = match p.peek()? {
+                b'{' => parse_enum_object(p, table)?,
+                // A bare number is an enum value with no known name (emitted by the forward path
+                // for values a router doesn't recognise, or sent by a newer producer).
+                _ => parse_u64(p.number_token()?),
+            };
             write_uint(payload, off, sk, value);
             Some(())
         }
@@ -592,16 +640,35 @@ fn enum_value(table: &[(u64, &'static str)], name: &[u8]) -> u64 {
     0
 }
 
-/// Reverse of [`put_bitmask`]: `" | "`-joined flag names back into a bitmask.
+/// Reverse of [`put_bitmask`]: `" | "`-joined flag names back into a bitmask. A `0x..` residual
+/// (unknown bits preserved by the forward path or a newer producer) is parsed back as hex, so
+/// unknown bits survive a full JSON -> wire round-trip.
 fn parse_bitmask(table: &[(u64, &'static str)], s: &[u8]) -> u64 {
     let mut bits = 0u64;
     for part in s.split(|&b| b == b'|') {
         let part = part.trim_ascii();
-        if !part.is_empty() {
+        if part.is_empty() {
+            continue;
+        }
+        if let [b'0', b'x' | b'X', hex @ ..] = part {
+            bits |= parse_hex_u64(hex);
+        } else {
             bits |= enum_value(table, part);
         }
     }
     bits
+}
+
+#[inline(always)]
+fn parse_hex_u64(s: &[u8]) -> u64 {
+    let mut v = 0u64;
+    for &b in s {
+        match hex_val(b) {
+            Some(d) => v = v * 16 + d as u64,
+            None => break,
+        }
+    }
+    v
 }
 
 /// Builds a MAVLink v2 frame (STX, header, trailing-zero-trimmed payload, CRC), byte-identical to
