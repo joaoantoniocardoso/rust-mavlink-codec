@@ -721,6 +721,7 @@ dependencies = [
  "log",
  "mavlink",
  "mavlink-codec",
+ "num-traits",
  "rand",
  "serde",
  "serde_json",
@@ -730,6 +731,7 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+ "zmij",
 ]
 
 [[package]]

@@ -128,6 +128,116 @@ fn spike_global_position_int_matches_baseline() {
     }
 }
 
+/// Option C spike (floats): ATTITUDE transcoder must match serde_json, including non-finite
+/// floats rendered as `null`. Uses arbitrary bit patterns to exercise NaN/Inf/subnormals.
+#[test]
+fn spike_attitude_matches_baseline() {
+    use mavlink::dialects::ardupilotmega::{MavMessage as M, ATTITUDE_DATA};
+    use mavlink_codec::mavlink_json::experimental;
+    use rand::Rng;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(101);
+    let mut out: Vec<u8> = Vec::new();
+
+    for _ in 0..5000 {
+        let data = ATTITUDE_DATA {
+            time_boot_ms: rng.random(),
+            roll: f32::from_bits(rng.random()),
+            pitch: f32::from_bits(rng.random()),
+            yaw: f32::from_bits(rng.random()),
+            rollspeed: f32::from_bits(rng.random()),
+            pitchspeed: f32::from_bits(rng.random()),
+            yawspeed: f32::from_bits(rng.random()),
+        };
+        let packet = build_packet(&M::ATTITUDE(data));
+
+        let baseline =
+            serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+        out.clear();
+        experimental::attitude_to_json(&packet, &mut out);
+        assert_eq!(std::str::from_utf8(&out).unwrap(), baseline);
+    }
+}
+
+/// Option C spike (numeric arrays): GPS_STATUS transcoder must match serde_json.
+#[test]
+fn spike_gps_status_matches_baseline() {
+    use mavlink::dialects::ardupilotmega::{MavMessage as M, GPS_STATUS_DATA};
+    use mavlink_codec::mavlink_json::experimental;
+    use rand::Rng;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(202);
+    let mut out: Vec<u8> = Vec::new();
+
+    for _ in 0..3000 {
+        let mut rand_array = || {
+            let mut a = [0u8; 20];
+            a.iter_mut().for_each(|v| *v = rng.random());
+            a
+        };
+        let data = GPS_STATUS_DATA {
+            satellite_prn: rand_array(),
+            satellite_used: rand_array(),
+            satellite_elevation: rand_array(),
+            satellite_azimuth: rand_array(),
+            satellite_snr: rand_array(),
+            satellites_visible: rng.random(),
+        };
+        let packet = build_packet(&M::GPS_STATUS(data));
+
+        let baseline =
+            serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+        out.clear();
+        experimental::gps_status_to_json(&packet, &mut out);
+        assert_eq!(std::str::from_utf8(&out).unwrap(), baseline);
+    }
+}
+
+/// Option C spike (enums + bitflags): HEARTBEAT transcoder must match serde_json across all
+/// valid enum variants and every base_mode bit combination.
+#[test]
+fn spike_heartbeat_matches_baseline() {
+    use mavlink::dialects::ardupilotmega::{
+        MavAutopilot, MavMessage as M, MavModeFlag, MavState, MavType, HEARTBEAT_DATA,
+    };
+    use mavlink_codec::mavlink_json::experimental;
+    use num_traits::FromPrimitive;
+    use rand::Rng;
+
+    let mut rng: StdRng = SeedableRng::seed_from_u64(303);
+    let mut out: Vec<u8> = Vec::new();
+
+    for _ in 0..5000 {
+        let data = HEARTBEAT_DATA {
+            custom_mode: rng.random(),
+            // All 8 base_mode bits are defined, so any u8 is a valid known-flag combination.
+            base_mode: MavModeFlag::from_bits_truncate(rng.random()),
+            mavtype: MavType::from_u8(rng.random_range(0..=49)).unwrap(),
+            autopilot: MavAutopilot::from_u8(rng.random_range(0..=20)).unwrap(),
+            system_status: MavState::from_u8(rng.random_range(0..=8)).unwrap(),
+            mavlink_version: rng.random(),
+        };
+        let packet = build_packet(&M::HEARTBEAT(data));
+
+        let baseline =
+            serde_json::to_string(&packet.to_mavlink_json::<MavMessage>().unwrap()).unwrap();
+        out.clear();
+        experimental::heartbeat_to_json(&packet, &mut out);
+        assert_eq!(std::str::from_utf8(&out).unwrap(), baseline);
+    }
+}
+
+fn build_packet(message: &MavMessage) -> Packet {
+    let header = mavlink::MavHeader {
+        system_id: 42,
+        component_id: 17,
+        sequence: 200,
+    };
+    let mut raw = mavlink::MAVLinkV2MessageRaw::new();
+    raw.serialize_message(header, message);
+    Packet::V2(V2Packet::from(raw))
+}
+
 /// Every v2 frame must survive `JSON -> wire -> JSON` unchanged (text stability).
 #[test]
 fn roundtrip_json_wire_json_v2() {

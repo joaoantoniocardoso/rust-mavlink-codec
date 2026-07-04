@@ -161,71 +161,84 @@ fn benchmark_json_to_packet(c: &mut Criterion) {
     group.finish();
 }
 
-/// Option C spike: hand-written `GLOBAL_POSITION_INT` transcoder vs. the Option A serde path,
-/// on a stream of GLOBAL_POSITION_INT frames only.
-fn benchmark_spike_global_position_int(c: &mut Criterion) {
+/// Option C spike: hand-written per-message transcoders vs. the Option A serde path, one
+/// benchmark group per representative message type (covering ints, floats, arrays, enums,
+/// bitflags), on a homogeneous stream of 1000 frames.
+fn benchmark_spike(c: &mut Criterion) {
     let seed = 42;
     println!("Using seed {seed:?}");
     let mut rng: StdRng = SeedableRng::seed_from_u64(seed);
 
-    let mut group = c.benchmark_group("packet_to_json_gpi");
-    group.confidence_level(0.95).sample_size(100);
-    group.plot_config(PlotConfiguration::default().summary_scale(AxisScale::Logarithmic));
+    type Transcoder = fn(&Packet, &mut Vec<u8>);
+    let cases: [(&str, u32, Transcoder); 4] = [
+        (
+            "global_position_int",
+            experimental::GLOBAL_POSITION_INT_ID,
+            experimental::global_position_int_to_json,
+        ),
+        (
+            "attitude",
+            experimental::ATTITUDE_ID,
+            experimental::attitude_to_json,
+        ),
+        (
+            "gps_status",
+            experimental::GPS_STATUS_ID,
+            experimental::gps_status_to_json,
+        ),
+        (
+            "heartbeat",
+            experimental::HEARTBEAT_ID,
+            experimental::heartbeat_to_json,
+        ),
+    ];
 
-    let messages_counts: Vec<usize> = vec![1, 10, 100, 1000, 10000];
+    let messages_count = 1000usize;
 
-    for messages_count in &messages_counts {
-        group.throughput(Throughput::Elements(*messages_count as u64));
+    for (label, msgid, transcode) in cases {
+        let mut group = c.benchmark_group(format!("packet_to_json_spike/{label}"));
+        group.confidence_level(0.95).sample_size(100);
+        group.throughput(Throughput::Elements(messages_count as u64));
 
-        let mut packets = Vec::with_capacity(*messages_count);
-        for _ in 0..*messages_count {
-            let raw =
-                create_random_v2_message_from_id(&mut rng, experimental::GLOBAL_POSITION_INT_ID)
-                    .unwrap();
+        let mut packets = Vec::with_capacity(messages_count);
+        for _ in 0..messages_count {
+            let raw = create_random_v2_message_from_id(&mut rng, msgid).unwrap();
             packets.push(Packet::V2(V2Packet::from(raw)));
         }
 
         // Option A: parse + serde into a reused buffer.
-        group.bench_with_input(
-            BenchmarkId::new("write_json-reused-buf", messages_count),
-            messages_count,
-            |b, &_messages_count| {
-                let mut buf: Vec<u8> = Vec::with_capacity(4096);
-                b.iter(|| {
-                    for packet in &packets {
-                        let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
-                        buf.clear();
-                        mavlink_json.write_json(&mut buf).unwrap();
-                        black_box(&buf);
-                    }
-                })
-            },
-        );
+        group.bench_function("write_json-reused-buf", |b| {
+            let mut buf: Vec<u8> = Vec::with_capacity(4096);
+            b.iter(|| {
+                for packet in &packets {
+                    let mavlink_json = packet.to_mavlink_json::<MavMessage>().unwrap();
+                    buf.clear();
+                    mavlink_json.write_json(&mut buf).unwrap();
+                    black_box(&buf);
+                }
+            })
+        });
 
         // Option C spike: wire bytes -> JSON directly, into a reused buffer.
-        group.bench_with_input(
-            BenchmarkId::new("spike-transcode", messages_count),
-            messages_count,
-            |b, &_messages_count| {
-                let mut buf: Vec<u8> = Vec::with_capacity(4096);
-                b.iter(|| {
-                    for packet in &packets {
-                        buf.clear();
-                        experimental::global_position_int_to_json(packet, &mut buf);
-                        black_box(&buf);
-                    }
-                })
-            },
-        );
-    }
+        group.bench_function("spike-transcode", |b| {
+            let mut buf: Vec<u8> = Vec::with_capacity(4096);
+            b.iter(|| {
+                for packet in &packets {
+                    buf.clear();
+                    transcode(packet, &mut buf);
+                    black_box(&buf);
+                }
+            })
+        });
 
-    group.finish();
+        group.finish();
+    }
 }
 
 criterion_group!(
     benches,
     benchmark_packet_to_json,
     benchmark_json_to_packet,
-    benchmark_spike_global_position_int
+    benchmark_spike
 );
 criterion_main!(benches);
