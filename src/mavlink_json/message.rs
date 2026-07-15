@@ -102,6 +102,11 @@ impl MAVLinkMessage {
         self.header_u8(b"component_id", |packet| *packet.component_id())
     }
 
+    /// The MAVLink sequence number, resolved as cheaply as possible (see [`Self::system_id`]).
+    pub fn sequence(&self) -> Option<u8> {
+        self.header_u8(b"sequence", |packet| *packet.sequence())
+    }
+
     /// Resolves a `u8` header field from the wire frame if present, else from the JSON header.
     fn header_u8(&self, key: &[u8], from_wire: fn(&Packet) -> u8) -> Option<u8> {
         if let Some(Some(packet)) = self.wire.get() {
@@ -173,8 +178,8 @@ fn json_type_tag(json: &[u8]) -> Option<&[u8]> {
 
 /// Returns the unsigned integer value of the first `"<key>":<number>` member. The key is matched
 /// quoted so it never collides with a message field of the same name (the header, which carries
-/// `system_id`/`component_id`, is always serialized before the `"message"` object). Reads only up
-/// to the value, avoiding a full parse.
+/// `system_id`/`component_id`/`sequence`, is always serialized before the `"message"` object). Reads
+/// only up to the value, avoiding a full parse.
 fn json_header_number(json: &[u8], key: &[u8]) -> Option<u64> {
     let mut i = 0;
     while i < json.len() {

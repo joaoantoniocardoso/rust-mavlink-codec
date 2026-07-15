@@ -68,19 +68,23 @@ pub enum ScalarKind {
 }
 
 /// Transcodes `packet` to MAVLinkJSON text using `desc`, appending to `out`.
-pub fn to_json(packet: PacketRef<'_>, desc: &MsgDesc, out: &mut Vec<u8>) {
-    write(packet, desc, out, &mut NoRec);
+///
+/// Accepts [`PacketRef`] or [`&Packet`](crate::Packet) (via [`Packet::as_ref`]).
+pub fn to_json<'a>(packet: impl Into<PacketRef<'a>>, desc: &MsgDesc, out: &mut Vec<u8>) {
+    write(packet.into(), desc, out, &mut NoRec);
 }
 
 /// Like [`to_json`] but also records the byte range of each field's rendered value into `ranges`
 /// (parallel to `desc.fields`), enabling zero-copy per-field `Bytes::slice` fan-out.
-pub fn to_json_indexed(
-    packet: PacketRef<'_>,
+///
+/// Accepts [`PacketRef`] or [`&Packet`](crate::Packet) (via [`Packet::as_ref`]).
+pub fn to_json_indexed<'a>(
+    packet: impl Into<PacketRef<'a>>,
     desc: &MsgDesc,
     out: &mut Vec<u8>,
     ranges: &mut [(u32, u32)],
 ) {
-    write(packet, desc, out, &mut SliceRec(ranges));
+    write(packet.into(), desc, out, &mut SliceRec(ranges));
 }
 
 trait Recorder {
