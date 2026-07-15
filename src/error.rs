@@ -4,6 +4,12 @@ use std::io;
 
 #[derive(Error, Debug)]
 pub enum DecoderError {
+    #[error("incomplete frame")]
+    Incomplete,
+
+    #[error("invalid STX: {stx:#04x}")]
+    InvalidStx { stx: u8 },
+
     #[error("invalid System ID: {sysid}")]
     InvalidSystemID { sysid: u8 },
 
