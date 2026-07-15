@@ -96,6 +96,140 @@ impl<
             signing: Some(signing),
         }
     }
+
+    /// Validates a complete MAVLink frame in place and returns a borrowed view.
+    ///
+    /// `buf` must begin at the frame STX. Extra trailing bytes are ignored; the returned
+    /// [`PacketRef`] borrows only the first complete frame. Applies the same policy toggles as
+    /// [`Decoder::decode`] (CRC, sysid/compid, incompat flags, signature, unknown msgid).
+    pub fn try_validate<'a>(&mut self, buf: &'a [u8]) -> Result<PacketRef<'a>, DecoderError> {
+        let Some(&stx) = buf.first() else {
+            return Err(DecoderError::Incomplete);
+        };
+
+        match stx {
+            V1_STX if ACCEPT_V1 => self.try_validate_v1(buf),
+            V2_STX if ACCEPT_V2 => self.try_validate_v2(buf),
+            _ => Err(DecoderError::InvalidStx { stx }),
+        }
+    }
+
+    fn try_validate_v1<'a>(&mut self, buf: &'a [u8]) -> Result<PacketRef<'a>, DecoderError> {
+        if buf.len() < V1Packet::STX_SIZE + V1Packet::HEADER_SIZE {
+            return Err(DecoderError::Incomplete);
+        }
+
+        let packet_size = v1::packet_size(&buf);
+        if buf.len() < packet_size {
+            return Err(DecoderError::Incomplete);
+        }
+        let frame = &buf[..packet_size];
+
+        if DROP_INVALID_SYSID {
+            let sysid = *v1::sysid(&frame);
+            if sysid == 0 {
+                return Err(DecoderError::InvalidSystemID { sysid });
+            }
+        }
+
+        if DROP_INVALID_COMPID {
+            let compid = *v1::compid(&frame);
+            if compid == 0 {
+                return Err(DecoderError::InvalidComponentID { compid });
+            }
+        }
+
+        if !SKIP_CRC_VALIDATION {
+            let msgid = u32::from(*v1::msgid(&frame));
+            match get_extra_crc(msgid) {
+                None => return Err(DecoderError::UnknownMessageID { msgid }),
+                Some(extra_crc) => {
+                    let checksum_data = v1::checksum_data(&frame);
+                    let calculated_crc = calculate_crc(checksum_data, extra_crc);
+                    let expected_crc = v1::checksum(&frame);
+                    if calculated_crc != expected_crc
+                        && !(ACCEPT_UNKNOWN_MSGID && !is_known_msgid(msgid))
+                    {
+                        return Err(DecoderError::InvalidCRC {
+                            expected_crc,
+                            calculated_crc,
+                        });
+                    }
+                }
+            }
+        }
+
+        if VERIFY_SIGNATURE {
+            return Err(DecoderError::InvalidSignature);
+        }
+
+        Ok(PacketRef::V1(crate::v1::V1PacketRef::from_buffer(frame)))
+    }
+
+    fn try_validate_v2<'a>(&mut self, buf: &'a [u8]) -> Result<PacketRef<'a>, DecoderError> {
+        if buf.len() < V2Packet::STX_SIZE + V2Packet::HEADER_SIZE {
+            return Err(DecoderError::Incomplete);
+        }
+
+        let packet_size = v2::packet_size(&buf);
+        if buf.len() < packet_size {
+            return Err(DecoderError::Incomplete);
+        }
+        let frame = &buf[..packet_size];
+
+        if DROP_INCOMPATIBLE {
+            let incompat_flags = *v2::incompat_flags(&frame);
+            if incompat_flags & !MAVLINK_SUPPORTED_IFLAGS > 0 {
+                return Err(DecoderError::Incompatible { incompat_flags });
+            }
+        }
+
+        if DROP_INVALID_SYSID {
+            let sysid = *v2::sysid(&frame);
+            if sysid == 0 {
+                return Err(DecoderError::InvalidSystemID { sysid });
+            }
+        }
+
+        if DROP_INVALID_COMPID {
+            let compid = *v2::compid(&frame);
+            if compid == 0 {
+                return Err(DecoderError::InvalidComponentID { compid });
+            }
+        }
+
+        if !SKIP_CRC_VALIDATION {
+            let msgid = v2::msgid(&frame);
+            match get_extra_crc(msgid) {
+                None => return Err(DecoderError::UnknownMessageID { msgid }),
+                Some(extra_crc) => {
+                    let checksum_data = v2::checksum_data(&frame);
+                    let calculated_crc = calculate_crc(checksum_data, extra_crc);
+                    let expected_crc = v2::checksum(&frame);
+                    if calculated_crc != expected_crc
+                        && !(ACCEPT_UNKNOWN_MSGID && !is_known_msgid(msgid))
+                    {
+                        return Err(DecoderError::InvalidCRC {
+                            expected_crc,
+                            calculated_crc,
+                        });
+                    }
+                }
+            }
+        }
+
+        if VERIFY_SIGNATURE {
+            let signature_ok = self
+                .signing
+                .as_mut()
+                .is_some_and(|signing| signing.verify_signature(frame));
+            if !signature_ok {
+                return Err(DecoderError::InvalidSignature);
+            }
+        }
+
+        Ok(PacketRef::V2(crate::v2::V2PacketRef::from_buffer(frame)))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -711,5 +845,54 @@ mod test_decode {
         let packet = codec.decode(&mut buf).unwrap().unwrap().unwrap();
 
         assert_eq!(packet, expected_packet);
+    }
+}
+
+#[cfg(test)]
+mod test_try_validate {
+    use super::*;
+    use mavlink::{dialects::ardupilotmega::MavMessage, MAVLinkV2MessageRaw, MavHeader, Message};
+
+    fn heartbeat_v2_bytes() -> Vec<u8> {
+        let header = MavHeader {
+            system_id: 1,
+            component_id: 1,
+            sequence: 0,
+        };
+        let message_data = MavMessage::default_message_from_id(0).unwrap();
+        let mut raw = MAVLinkV2MessageRaw::new();
+        raw.serialize_message(header, &message_data);
+        raw.raw_bytes().to_vec()
+    }
+
+    #[test]
+    fn try_validate_accepts_valid_v2() {
+        let mut codec = MavlinkCodec::<true, true, false, false, false, false, false>::default();
+        let bytes = heartbeat_v2_bytes();
+        let packet = codec.try_validate(&bytes).unwrap();
+        assert_eq!(packet.message_id(), 0);
+        assert_eq!(*packet.system_id(), 1);
+    }
+
+    #[test]
+    fn try_validate_rejects_bad_crc() {
+        let mut codec = MavlinkCodec::<true, true, false, false, false, false, false>::default();
+        let mut bytes = heartbeat_v2_bytes();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        assert!(matches!(
+            codec.try_validate(&bytes),
+            Err(DecoderError::InvalidCRC { .. })
+        ));
+    }
+
+    #[test]
+    fn try_validate_rejects_incomplete() {
+        let mut codec = MavlinkCodec::<true, true, false, false, false, false, false>::default();
+        let bytes = heartbeat_v2_bytes();
+        assert!(matches!(
+            codec.try_validate(&bytes[..5]),
+            Err(DecoderError::Incomplete)
+        ));
     }
 }
