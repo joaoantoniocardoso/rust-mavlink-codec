@@ -7,7 +7,7 @@ use crate::{
     error::DecoderError,
     v1::{self, V1Packet, V1_STX},
     v2::{self, V2Packet, MAVLINK_SUPPORTED_IFLAGS, V2_STX},
-    Packet,
+    Packet, PacketRef,
 };
 
 /// MAVLink packet codec whose behavior is selected at compile time through
@@ -476,6 +476,53 @@ impl<
         const DROP_INCOMPATIBLE: bool,
         const VERIFY_SIGNATURE: bool,
         const ACCEPT_UNKNOWN_MSGID: bool,
+    > Encoder<PacketRef<'_>>
+    for MavlinkCodec<
+        ACCEPT_V1,
+        ACCEPT_V2,
+        DROP_INVALID_SYSID,
+        DROP_INVALID_COMPID,
+        SKIP_CRC_VALIDATION,
+        DROP_INCOMPATIBLE,
+        VERIFY_SIGNATURE,
+        ACCEPT_UNKNOWN_MSGID,
+    >
+{
+    type Error = std::io::Error;
+
+    fn encode(&mut self, packet: PacketRef<'_>, buf: &mut BytesMut) -> Result<(), Self::Error> {
+        trace!("encoding...");
+        match packet {
+            PacketRef::V1(v1_packet) if ACCEPT_V1 => {
+                trace!("v1 package written");
+                buf.put(v1_packet.as_slice());
+            }
+            PacketRef::V2(v2_packet) if ACCEPT_V2 => {
+                trace!("v2 package written");
+                buf.put(v2_packet.as_slice());
+            }
+            _ => {
+                trace!("unsupported package version");
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Unsupported packet version",
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl<
+        const ACCEPT_V1: bool,
+        const ACCEPT_V2: bool,
+        const DROP_INVALID_SYSID: bool,
+        const DROP_INVALID_COMPID: bool,
+        const SKIP_CRC_VALIDATION: bool,
+        const DROP_INCOMPATIBLE: bool,
+        const VERIFY_SIGNATURE: bool,
+        const ACCEPT_UNKNOWN_MSGID: bool,
     > Encoder<Packet>
     for MavlinkCodec<
         ACCEPT_V1,
@@ -491,26 +538,7 @@ impl<
     type Error = std::io::Error;
 
     fn encode(&mut self, packet: Packet, buf: &mut BytesMut) -> Result<(), Self::Error> {
-        trace!("encoding...");
-        match packet {
-            Packet::V1(v1_packet) if ACCEPT_V1 => {
-                trace!("v1 package written");
-                buf.put(v1_packet.as_slice());
-            }
-            Packet::V2(v2_packet) if ACCEPT_V2 => {
-                trace!("v2 package written");
-                buf.put(v2_packet.as_slice());
-            }
-            _ => {
-                trace!("unsupported package version");
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Unsupported packet version",
-                ));
-            }
-        }
-
-        Ok(())
+        Encoder::<PacketRef<'_>>::encode(self, packet.as_ref(), buf)
     }
 }
 
@@ -589,6 +617,32 @@ mod test_encode {
 
         codec
             .encode(Packet::V2(v2_packet.clone()), &mut buf)
+            .unwrap();
+
+        assert_eq!(&buf[..v2_packet.packet_size()], v2_packet.as_slice())
+    }
+
+    #[test]
+    fn test_encode_packet_ref_v2() {
+        let mut codec = MavlinkCodec::<true, true, false, false, false, false, false>::default();
+
+        let v2_packet = {
+            let header = MavHeader {
+                system_id: 1,
+                component_id: 1,
+                sequence: 0,
+            };
+
+            let message_data = MavMessage::default_message_from_id(0).unwrap(); // Heartbeat message
+            let mut raw_v2_message = MAVLinkV2MessageRaw::new();
+            raw_v2_message.serialize_message(header, &message_data);
+            V2Packet::from(raw_v2_message)
+        };
+
+        let mut buf = BytesMut::with_capacity(V2Packet::MAX_PACKET_SIZE);
+
+        codec
+            .encode(PacketRef::V2(v2_packet.as_ref()), &mut buf)
             .unwrap();
 
         assert_eq!(&buf[..v2_packet.packet_size()], v2_packet.as_slice())
