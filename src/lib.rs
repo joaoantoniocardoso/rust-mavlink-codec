@@ -161,6 +161,13 @@ impl Packet {
     }
 }
 
+impl<'a> From<&'a Packet> for PacketRef<'a> {
+    #[inline(always)]
+    fn from(packet: &'a Packet) -> Self {
+        packet.as_ref()
+    }
+}
+
 impl<'a> PacketRef<'a> {
     #[inline(always)]
     pub fn new(buffer: &'a [u8]) -> Option<Self> {
