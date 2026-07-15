@@ -45,6 +45,12 @@ impl V1Packet {
         &self.buffer[..]
     }
 
+    /// Zero-copy borrowed view of this owned frame.
+    #[inline(always)]
+    pub fn as_ref(&self) -> V1PacketRef<'_> {
+        V1PacketRef::from_buffer(self.as_slice())
+    }
+
     #[inline(always)]
     pub fn header(&self) -> &[u8] {
         header(&self.buffer)
@@ -128,11 +134,57 @@ impl<'a> V1PacketRef<'a> {
         if buffer.len() < V1Packet::STX_SIZE + V1Packet::HEADER_SIZE {
             return None;
         }
-        let payload_len = *len(&buffer) as usize;
-        if buffer.len() < V1Packet::STX_SIZE + V1Packet::HEADER_SIZE + payload_len {
+        let size = packet_size(&buffer);
+        if buffer.len() < size {
             return None;
         }
-        Some(Self { buffer })
+        Some(Self::from_buffer(buffer))
+    }
+
+    #[inline(always)]
+    pub(crate) fn from_buffer(buffer: &'a [u8]) -> Self {
+        Self { buffer }
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &'a [u8] {
+        self.buffer
+    }
+
+    #[inline(always)]
+    pub fn header(&self) -> &'a [u8] {
+        let header_start = V1Packet::STX_SIZE;
+        &self.buffer[header_start..header_start + V1Packet::HEADER_SIZE]
+    }
+
+    #[inline(always)]
+    pub fn payload(&self) -> &'a [u8] {
+        let payload_start = V1Packet::STX_SIZE + V1Packet::HEADER_SIZE;
+        let payload_size = *len(&self.buffer) as usize;
+        &self.buffer[payload_start..payload_start + payload_size]
+    }
+
+    #[inline(always)]
+    pub fn checksum(&self) -> u16 {
+        checksum(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn checksum_data(&self) -> &'a [u8] {
+        let checksum_data_start = V1Packet::STX_SIZE;
+        let payload_size = *len(&self.buffer) as usize;
+        let checksum_data_end = V1Packet::STX_SIZE + V1Packet::HEADER_SIZE + payload_size;
+        &self.buffer[checksum_data_start..checksum_data_end]
+    }
+
+    #[inline(always)]
+    pub fn packet_size(&self) -> usize {
+        packet_size(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn stx(&self) -> &u8 {
+        stx(&self.buffer)
     }
 
     #[inline(always)]
@@ -160,11 +212,10 @@ impl<'a> V1PacketRef<'a> {
         msgid(&self.buffer)
     }
 
-    #[inline(always)]
-    pub fn payload(&self) -> &'a [u8] {
-        let payload_start = V1Packet::STX_SIZE + V1Packet::HEADER_SIZE;
-        let payload_size = *len(&self.buffer) as usize;
-        &self.buffer[payload_start..payload_start + payload_size]
+    /// Copies this borrowed frame into an owned [`V1Packet`].
+    #[inline]
+    pub fn to_owned(&self) -> V1Packet {
+        V1Packet::new(Bytes::copy_from_slice(self.as_slice()))
     }
 }
 
