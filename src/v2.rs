@@ -54,6 +54,12 @@ impl V2Packet {
         &self.buffer[..]
     }
 
+    /// Zero-copy borrowed view of this owned frame.
+    #[inline(always)]
+    pub fn as_ref(&self) -> V2PacketRef<'_> {
+        V2PacketRef::from_buffer(self.as_slice())
+    }
+
     #[inline(always)]
     pub fn header(&self) -> &[u8] {
         header(&self.buffer)
@@ -177,16 +183,114 @@ impl<'a> V2PacketRef<'a> {
         if buffer.len() < V2Packet::STX_SIZE + V2Packet::HEADER_SIZE {
             return None;
         }
-        let payload_len = *len(&buffer) as usize;
-        if buffer.len() < V2Packet::STX_SIZE + V2Packet::HEADER_SIZE + payload_len {
+        let size = packet_size(&buffer);
+        if buffer.len() < size {
             return None;
         }
-        Some(Self { buffer })
+        Some(Self::from_buffer(buffer))
+    }
+
+    #[inline(always)]
+    pub(crate) fn from_buffer(buffer: &'a [u8]) -> Self {
+        Self { buffer }
+    }
+
+    #[inline(always)]
+    pub fn as_slice(&self) -> &'a [u8] {
+        self.buffer
+    }
+
+    #[inline(always)]
+    pub fn header(&self) -> &'a [u8] {
+        let header_start = V2Packet::STX_SIZE;
+        &self.buffer[header_start..header_start + V2Packet::HEADER_SIZE]
+    }
+
+    #[inline(always)]
+    pub fn payload(&self) -> &'a [u8] {
+        let payload_start = V2Packet::STX_SIZE + V2Packet::HEADER_SIZE;
+        let payload_size = *len(&self.buffer) as usize;
+        &self.buffer[payload_start..payload_start + payload_size]
+    }
+
+    #[inline(always)]
+    pub fn checksum(&self) -> u16 {
+        checksum(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn signature(&self) -> Option<&'a [u8]> {
+        if !has_signature(&self.buffer) {
+            return None;
+        }
+        let payload_size = *len(&self.buffer) as usize;
+        let signature_start =
+            V2Packet::STX_SIZE + V2Packet::HEADER_SIZE + payload_size + V2Packet::CHECKSUM_SIZE;
+        Some(&self.buffer[signature_start..signature_start + V2Packet::SIGNATURE_SIZE])
+    }
+
+    #[inline(always)]
+    pub fn signature_link_id(&self) -> Option<u8> {
+        signature_link_id(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn signature_timestamp(&self) -> Option<&'a [u8]> {
+        let timestamp_start = V2Packet::SIGNATURE_LINK_ID_SIZE;
+        let timestamp_end = timestamp_start + V2Packet::SIGNATURE_TIMESTAMP_SIZE;
+        self.signature()
+            .map(|signature| &signature[timestamp_start..timestamp_end])
+    }
+
+    #[inline(always)]
+    pub fn signature_timestamp_u64(&self) -> Option<u64> {
+        signature_timestamp_u64(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn signature_value(&self) -> Option<&'a [u8]> {
+        let value_start = V2Packet::SIGNATURE_LINK_ID_SIZE + V2Packet::SIGNATURE_TIMESTAMP_SIZE;
+        let value_end = value_start + V2Packet::SIGNATURE_VALUE_SIZE;
+        self.signature()
+            .map(|signature| &signature[value_start..value_end])
+    }
+
+    #[inline(always)]
+    pub fn checksum_data(&self) -> &'a [u8] {
+        let checksum_data_start = V2Packet::STX_SIZE;
+        let payload_size = *len(&self.buffer) as usize;
+        let checksum_data_end = V2Packet::STX_SIZE + V2Packet::HEADER_SIZE + payload_size;
+        &self.buffer[checksum_data_start..checksum_data_end]
+    }
+
+    #[inline(always)]
+    pub fn packet_size(&self) -> usize {
+        packet_size(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn has_signature(&self) -> bool {
+        has_signature(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn stx(&self) -> &u8 {
+        stx(&self.buffer)
     }
 
     #[inline(always)]
     pub fn payload_length(&self) -> &u8 {
         len(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn incompatibility_flags(&self) -> &u8 {
+        incompat_flags(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn compatibility_flags(&self) -> &u8 {
+        compat_flags(&self.buffer)
     }
 
     #[inline(always)]
@@ -209,11 +313,10 @@ impl<'a> V2PacketRef<'a> {
         msgid(&self.buffer)
     }
 
-    #[inline(always)]
-    pub fn payload(&self) -> &'a [u8] {
-        let payload_start = V2Packet::STX_SIZE + V2Packet::HEADER_SIZE;
-        let payload_size = *len(&self.buffer) as usize;
-        &self.buffer[payload_start..payload_start + payload_size]
+    /// Copies this borrowed frame into an owned [`V2Packet`].
+    #[inline]
+    pub fn to_owned(&self) -> V2Packet {
+        V2Packet::new(Bytes::copy_from_slice(self.as_slice()))
     }
 }
 
