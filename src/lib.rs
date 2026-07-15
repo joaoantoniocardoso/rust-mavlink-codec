@@ -42,6 +42,18 @@ impl Packet {
         }
     }
 
+    /// Zero-copy borrowed view of this owned frame.
+    ///
+    /// Prefer operating on [`PacketRef`] (field access, typed parse) so work stays
+    /// in place on the underlying buffer.
+    #[inline(always)]
+    pub fn as_ref(&self) -> PacketRef<'_> {
+        match self {
+            Packet::V1(v1_packet) => PacketRef::V1(v1_packet.as_ref()),
+            Packet::V2(v2_packet) => PacketRef::V2(v2_packet.as_ref()),
+        }
+    }
+
     #[inline(always)]
     pub fn header(&self) -> &[u8] {
         match self {
@@ -160,10 +172,74 @@ impl<'a> PacketRef<'a> {
     }
 
     #[inline(always)]
-    pub fn message_id(&self) -> u32 {
+    pub fn as_slice(&self) -> &'a [u8] {
         match self {
-            PacketRef::V1(packet) => *packet.message_id() as u32,
-            PacketRef::V2(packet) => packet.message_id(),
+            PacketRef::V1(packet) => packet.as_slice(),
+            PacketRef::V2(packet) => packet.as_slice(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn header(&self) -> &'a [u8] {
+        match self {
+            PacketRef::V1(packet) => packet.header(),
+            PacketRef::V2(packet) => packet.header(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn payload(&self) -> &'a [u8] {
+        match self {
+            PacketRef::V1(packet) => packet.payload(),
+            PacketRef::V2(packet) => packet.payload(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn checksum(&self) -> u16 {
+        match self {
+            PacketRef::V1(packet) => packet.checksum(),
+            PacketRef::V2(packet) => packet.checksum(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn checksum_data(&self) -> &'a [u8] {
+        match self {
+            PacketRef::V1(packet) => packet.checksum_data(),
+            PacketRef::V2(packet) => packet.checksum_data(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn packet_size(&self) -> usize {
+        match self {
+            PacketRef::V1(packet) => packet.packet_size(),
+            PacketRef::V2(packet) => packet.packet_size(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn stx(&self) -> &u8 {
+        match self {
+            PacketRef::V1(packet) => packet.stx(),
+            PacketRef::V2(packet) => packet.stx(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn payload_length(&self) -> &u8 {
+        match self {
+            PacketRef::V1(packet) => packet.payload_length(),
+            PacketRef::V2(packet) => packet.payload_length(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn sequence(&self) -> &u8 {
+        match self {
+            PacketRef::V1(packet) => packet.sequence(),
+            PacketRef::V2(packet) => packet.sequence(),
         }
     }
 
@@ -184,18 +260,19 @@ impl<'a> PacketRef<'a> {
     }
 
     #[inline(always)]
-    pub fn sequence(&self) -> &u8 {
+    pub fn message_id(&self) -> u32 {
         match self {
-            PacketRef::V1(packet) => packet.sequence(),
-            PacketRef::V2(packet) => packet.sequence(),
+            PacketRef::V1(packet) => *packet.message_id() as u32,
+            PacketRef::V2(packet) => packet.message_id(),
         }
     }
 
-    #[inline(always)]
-    pub fn payload(&self) -> &'a [u8] {
+    /// Copies this borrowed frame into an owned [`Packet`].
+    #[inline]
+    pub fn to_owned(&self) -> Packet {
         match self {
-            PacketRef::V1(packet) => packet.payload(),
-            PacketRef::V2(packet) => packet.payload(),
+            PacketRef::V1(packet) => Packet::V1(packet.to_owned()),
+            PacketRef::V2(packet) => Packet::V2(packet.to_owned()),
         }
     }
 }
