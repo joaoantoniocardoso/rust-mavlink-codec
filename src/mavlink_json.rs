@@ -9,7 +9,7 @@ use bytes::Bytes;
 use mavlink::{MavHeader, MavlinkVersion, Message};
 use serde::{Deserialize, Serialize};
 
-use crate::Packet;
+use crate::{Packet, PacketRef};
 
 pub mod generated;
 pub mod message;
@@ -34,16 +34,17 @@ pub struct MAVLinkJSONHeader {
     pub message_id: Option<u32>,
 }
 
-impl Packet {
-    /// Parses the frame payload into a typed [`MAVLinkJSON`] wrapper.
+impl PacketRef<'_> {
+    /// Parses the frame payload in place into a typed [`MAVLinkJSON`] wrapper.
     ///
+    /// Prefer this (or [`Packet::as_ref`]) over paths that copy into rust-mavlink raw buffers.
     /// Serialize the returned value with `serde_json` to obtain the JSON text.
     pub fn to_mavlink_json<M: Message>(
         &self,
     ) -> Result<MAVLinkJSON<M>, mavlink::error::ParserError> {
         let version = match self {
-            Packet::V1(_) => MavlinkVersion::V1,
-            Packet::V2(_) => MavlinkVersion::V2,
+            PacketRef::V1(_) => MavlinkVersion::V1,
+            PacketRef::V2(_) => MavlinkVersion::V2,
         };
         let message_id = self.message_id();
 
@@ -64,15 +65,37 @@ impl Packet {
     /// Transcodes this frame straight to MAVLinkJSON text via the generated descriptor tables,
     /// appending to `out`. Returns `false` (leaving `out` untouched) if the message id is not
     /// covered by the generator. Produces the exact same bytes as serializing
-    /// [`Packet::to_mavlink_json`] with `serde_json`, without a typed parse or serde.
+    /// [`PacketRef::to_mavlink_json`] with `serde_json`, without a typed parse or serde.
     pub fn write_json_transcoded(&self, out: &mut Vec<u8>) -> bool {
         match generated::descriptor(self.message_id()) {
             Some(desc) => {
-                rt::to_json(self, desc, out);
+                rt::to_json(*self, desc, out);
                 true
             }
             None => false,
         }
+    }
+}
+
+impl Packet {
+    /// Parses the frame payload into a typed [`MAVLinkJSON`] wrapper.
+    ///
+    /// Delegates to [`PacketRef::to_mavlink_json`] via [`Packet::as_ref`].
+    /// Serialize the returned value with `serde_json` to obtain the JSON text.
+    pub fn to_mavlink_json<M: Message>(
+        &self,
+    ) -> Result<MAVLinkJSON<M>, mavlink::error::ParserError> {
+        self.as_ref().to_mavlink_json()
+    }
+
+    /// Transcodes this frame straight to MAVLinkJSON text via the generated descriptor tables,
+    /// appending to `out`. Returns `false` (leaving `out` untouched) if the message id is not
+    /// covered by the generator. Produces the exact same bytes as serializing
+    /// [`Packet::to_mavlink_json`] with `serde_json`, without a typed parse or serde.
+    ///
+    /// Delegates to [`PacketRef::write_json_transcoded`] via [`Packet::as_ref`].
+    pub fn write_json_transcoded(&self, out: &mut Vec<u8>) -> bool {
+        self.as_ref().write_json_transcoded(out)
     }
 
     /// Transcodes MAVLinkJSON text straight to a wire v2 [`Packet`] via the generated descriptor

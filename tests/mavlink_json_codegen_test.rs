@@ -71,7 +71,7 @@ fn generated_indexed_ranges_match_serde_fields() {
             let expected_full = serde_json::to_string(&mavlink_json).unwrap();
 
             out.clear();
-            rt::to_json_indexed(&packet, desc, &mut out, &mut ranges);
+            rt::to_json_indexed(packet.as_ref(), desc, &mut out, &mut ranges);
             assert_eq!(
                 out,
                 expected_full.as_bytes(),

@@ -11,7 +11,7 @@ use mavlink::MavlinkVersion;
 
 use crate::v1::{V1Packet, V1_STX};
 use crate::v2::{V2Packet, V2_STX};
-use crate::Packet;
+use crate::{Packet, PacketRef};
 
 /// A whole message: its id, wire name (the serde `"type"` tag) and ordered fields.
 ///
@@ -68,14 +68,14 @@ pub enum ScalarKind {
 }
 
 /// Transcodes `packet` to MAVLinkJSON text using `desc`, appending to `out`.
-pub fn to_json(packet: &Packet, desc: &MsgDesc, out: &mut Vec<u8>) {
+pub fn to_json(packet: PacketRef<'_>, desc: &MsgDesc, out: &mut Vec<u8>) {
     write(packet, desc, out, &mut NoRec);
 }
 
 /// Like [`to_json`] but also records the byte range of each field's rendered value into `ranges`
 /// (parallel to `desc.fields`), enabling zero-copy per-field `Bytes::slice` fan-out.
 pub fn to_json_indexed(
-    packet: &Packet,
+    packet: PacketRef<'_>,
     desc: &MsgDesc,
     out: &mut Vec<u8>,
     ranges: &mut [(u32, u32)],
@@ -101,7 +101,7 @@ impl Recorder for SliceRec<'_> {
     }
 }
 
-fn write<R: Recorder>(packet: &Packet, desc: &MsgDesc, out: &mut Vec<u8>, rec: &mut R) {
+fn write<R: Recorder>(packet: PacketRef<'_>, desc: &MsgDesc, out: &mut Vec<u8>, rec: &mut R) {
     // Read straight from the wire payload: MAVLink v2 only trims *trailing zero* bytes, so any
     // byte past the truncated length reads back as zero (see `rd`). This avoids copying/zeroing a
     // scratch buffer per message.
@@ -315,7 +315,7 @@ fn put_hex_lower(out: &mut Vec<u8>, value: u64) {
 }
 
 #[inline(always)]
-fn put_header(packet: &Packet, out: &mut Vec<u8>) {
+fn put_header(packet: PacketRef<'_>, out: &mut Vec<u8>) {
     out.extend_from_slice(br#"{"header":{"system_id":"#);
     put_int(out, *packet.system_id());
     out.extend_from_slice(br#","component_id":"#);

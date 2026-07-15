@@ -100,7 +100,7 @@ fn benchmark_per_field_egress(c: &mut Criterion) {
             for packet in &packets {
                 out.clear();
                 let mut ranges = [(0u32, 0u32); 9];
-                rt::to_json_indexed(packet, desc, &mut out, &mut ranges);
+                rt::to_json_indexed(packet.as_ref(), desc, &mut out, &mut ranges);
                 let blob = Bytes::copy_from_slice(&out);
                 black_box(&blob);
 
@@ -182,7 +182,7 @@ fn benchmark_per_field_egress_gps_status(c: &mut Criterion) {
             for packet in &packets {
                 out.clear();
                 let mut ranges = [(0u32, 0u32); 6];
-                rt::to_json_indexed(packet, desc, &mut out, &mut ranges);
+                rt::to_json_indexed(packet.as_ref(), desc, &mut out, &mut ranges);
                 let blob = Bytes::copy_from_slice(&out);
                 black_box(&blob);
 
