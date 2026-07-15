@@ -9,14 +9,20 @@ pub mod v2;
 
 use bytes::Bytes;
 
-use v1::{V1Packet, V1_STX};
-use v2::{V2Packet, V2_STX};
+use v1::{V1Packet, V1PacketRef, V1_STX};
+use v2::{V2Packet, V2PacketRef, V2_STX};
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum Packet {
     V1(V1Packet) = V1_STX,
     V2(V2Packet) = V2_STX,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum PacketRef<'a> {
+    V1(V1PacketRef<'a>),
+    V2(V2PacketRef<'a>),
 }
 
 impl Packet {
@@ -140,6 +146,110 @@ impl Packet {
             Packet::V1(v1_packet) => *v1_packet.message_id() as u32,
             Packet::V2(v2_packet) => v2_packet.message_id(),
         }
+    }
+}
+
+impl<'a> PacketRef<'a> {
+    #[inline(always)]
+    pub fn new(buffer: &'a [u8]) -> Option<Self> {
+        match *buffer.first()? {
+            V2_STX => V2PacketRef::new(buffer).map(PacketRef::V2),
+            V1_STX => V1PacketRef::new(buffer).map(PacketRef::V1),
+            _ => None,
+        }
+    }
+
+    #[inline(always)]
+    pub fn message_id(&self) -> u32 {
+        match self {
+            PacketRef::V1(packet) => *packet.message_id() as u32,
+            PacketRef::V2(packet) => packet.message_id(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn system_id(&self) -> &u8 {
+        match self {
+            PacketRef::V1(packet) => packet.system_id(),
+            PacketRef::V2(packet) => packet.system_id(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn component_id(&self) -> &u8 {
+        match self {
+            PacketRef::V1(packet) => packet.component_id(),
+            PacketRef::V2(packet) => packet.component_id(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn sequence(&self) -> &u8 {
+        match self {
+            PacketRef::V1(packet) => packet.sequence(),
+            PacketRef::V2(packet) => packet.sequence(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn payload(&self) -> &'a [u8] {
+        match self {
+            PacketRef::V1(packet) => packet.payload(),
+            PacketRef::V2(packet) => packet.payload(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod packet_ref_test {
+    use super::*;
+    use v1::V1Packet;
+    use v2::V2Packet;
+
+    const COMMAND_LONG: &[u8] = &[
+        253, 30, 0, 0, 0, 0, 50, 76, 0, 0, 0, 0, 230, 66, 0, 64, 156, 69, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 1, 188, 195,
+    ];
+
+    const HEARTBEAT_V1: &[u8] = &[254, 9, 239, 1, 2, 0, 5, 0, 0, 0, 2, 3, 89, 3, 3, 31, 80];
+
+    #[test]
+    fn packet_ref_v2_command_long() {
+        let packet = PacketRef::new(COMMAND_LONG).expect("valid v2 frame");
+        assert!(matches!(packet, PacketRef::V2(_)));
+        assert_eq!(packet.message_id(), 76);
+        assert_eq!(*packet.system_id(), 0);
+        assert_eq!(*packet.component_id(), 50);
+        assert_eq!(*packet.sequence(), 0);
+        assert_eq!(packet.payload().len(), 30);
+        assert_eq!(
+            packet.payload(),
+            &COMMAND_LONG[V2Packet::STX_SIZE + V2Packet::HEADER_SIZE
+                ..V2Packet::STX_SIZE + V2Packet::HEADER_SIZE + 30]
+        );
+    }
+
+    #[test]
+    fn packet_ref_v1_heartbeat() {
+        let packet = PacketRef::new(HEARTBEAT_V1).expect("valid v1 frame");
+        assert!(matches!(packet, PacketRef::V1(_)));
+        assert_eq!(packet.message_id(), 0);
+        assert_eq!(*packet.system_id(), 1);
+        assert_eq!(*packet.component_id(), 2);
+        assert_eq!(*packet.sequence(), 239);
+        assert_eq!(packet.payload().len(), 9);
+        assert_eq!(
+            packet.payload(),
+            &HEARTBEAT_V1[V1Packet::STX_SIZE + V1Packet::HEADER_SIZE
+                ..V1Packet::STX_SIZE + V1Packet::HEADER_SIZE + 9]
+        );
+    }
+
+    #[test]
+    fn packet_ref_rejects_invalid() {
+        assert!(PacketRef::new(&[]).is_none());
+        assert!(PacketRef::new(&[0x00, 0x01]).is_none());
+        assert!(PacketRef::new(&[253, 30, 0, 0, 0, 0, 50, 76, 0, 0]).is_none());
     }
 }
 

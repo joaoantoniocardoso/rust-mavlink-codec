@@ -7,6 +7,11 @@ pub struct V1Packet {
     pub(crate) buffer: Bytes,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct V1PacketRef<'a> {
+    buffer: &'a [u8],
+}
+
 impl std::fmt::Debug for V1Packet {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("V1Packet")
@@ -114,6 +119,52 @@ impl V1Packet {
     #[inline(always)]
     pub fn message_id(&self) -> &u8 {
         msgid(&self.buffer)
+    }
+}
+
+impl<'a> V1PacketRef<'a> {
+    #[inline(always)]
+    pub fn new(buffer: &'a [u8]) -> Option<Self> {
+        if buffer.len() < V1Packet::STX_SIZE + V1Packet::HEADER_SIZE {
+            return None;
+        }
+        let payload_len = *len(&buffer) as usize;
+        if buffer.len() < V1Packet::STX_SIZE + V1Packet::HEADER_SIZE + payload_len {
+            return None;
+        }
+        Some(Self { buffer })
+    }
+
+    #[inline(always)]
+    pub fn payload_length(&self) -> &u8 {
+        len(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn sequence(&self) -> &u8 {
+        seq(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn system_id(&self) -> &u8 {
+        sysid(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn component_id(&self) -> &u8 {
+        compid(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn message_id(&self) -> &u8 {
+        msgid(&self.buffer)
+    }
+
+    #[inline(always)]
+    pub fn payload(&self) -> &'a [u8] {
+        let payload_start = V1Packet::STX_SIZE + V1Packet::HEADER_SIZE;
+        let payload_size = *len(&self.buffer) as usize;
+        &self.buffer[payload_start..payload_start + payload_size]
     }
 }
 
