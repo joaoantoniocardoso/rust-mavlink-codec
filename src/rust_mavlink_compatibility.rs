@@ -6,9 +6,10 @@
 //! copy into `MAVLinkV*MessageRaw`) when you truly need an owned buffer.
 
 use bytes::Bytes;
-use mavlink::{MavHeader, MavlinkVersion, Message};
+use mavlink::{calculate_crc, MavHeader, MavlinkVersion, Message};
 
 use crate::{
+    error::DecoderError,
     v1::{V1Packet, V1PacketRef},
     v2::{V2Packet, V2PacketRef},
     Packet, PacketRef,
@@ -35,6 +36,22 @@ impl V1PacketRef<'_> {
         )?;
         Ok((header, message))
     }
+
+    /// Validates the frame checksum in place against the `extra_crc` of the message id
+    /// in dialect `M`, without allocating, copying, or instantiating a codec.
+    #[inline]
+    pub fn try_validate<M: Message>(&self) -> Result<(), DecoderError> {
+        let extra_crc = M::extra_crc(u32::from(*self.message_id()));
+        let calculated_crc = calculate_crc(self.checksum_data(), extra_crc);
+        let expected_crc = self.checksum();
+        if calculated_crc != expected_crc {
+            return Err(DecoderError::InvalidCRC {
+                expected_crc,
+                calculated_crc,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl V2PacketRef<'_> {
@@ -54,6 +71,22 @@ impl V2PacketRef<'_> {
         let message = M::parse(MavlinkVersion::V2, self.message_id(), self.payload())?;
         Ok((header, message))
     }
+
+    /// Validates the frame checksum in place against the `extra_crc` of the message id
+    /// in dialect `M`, without allocating, copying, or instantiating a codec.
+    #[inline]
+    pub fn try_validate<M: Message>(&self) -> Result<(), DecoderError> {
+        let extra_crc = M::extra_crc(self.message_id());
+        let calculated_crc = calculate_crc(self.checksum_data(), extra_crc);
+        let expected_crc = self.checksum();
+        if calculated_crc != expected_crc {
+            return Err(DecoderError::InvalidCRC {
+                expected_crc,
+                calculated_crc,
+            });
+        }
+        Ok(())
+    }
 }
 
 impl PacketRef<'_> {
@@ -68,6 +101,16 @@ impl PacketRef<'_> {
         match self {
             PacketRef::V1(packet) => packet.to_mav_message(),
             PacketRef::V2(packet) => packet.to_mav_message(),
+        }
+    }
+
+    /// Validates the frame checksum in place against the `extra_crc` of the message id
+    /// in dialect `M`, without allocating, copying, or instantiating a codec.
+    #[inline]
+    pub fn try_validate<M: Message>(&self) -> Result<(), DecoderError> {
+        match self {
+            PacketRef::V1(packet) => packet.try_validate::<M>(),
+            PacketRef::V2(packet) => packet.try_validate::<M>(),
         }
     }
 }
